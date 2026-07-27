@@ -4,9 +4,8 @@ from analysis.expiry import ExpiryEstimator
 
 
 class Seasonality:
-    def __init__(self, db, symbol):
+    def __init__(self, db):
         self.db = db
-        self.symbol = symbol
         self.estimator = ExpiryEstimator(db)
 
     # ---------------- shared helpers ----------------
@@ -25,9 +24,8 @@ class Seasonality:
                 ticktext.append(date.strftime('%b'))
         return tickvals, ticktext
 
-    def _leg_window(self, code, window_days):
-        """Estimate expiry for `code` and return (expiry, window_start, window_end)."""
-        expiry, _ = self.estimator.estimate_expiry(self.symbol, code)
+    def _leg_window(self, symbol, code, window_days):
+        expiry, _ = self.estimator.estimate_expiry(symbol, code)
         if expiry is None:
             return None, None, None
         today = pd.Timestamp(pd.Timestamp.now().date())
@@ -38,10 +36,10 @@ class Seasonality:
 
     # ---------------- outright seasonality ----------------
 
-    def outright_seasonality(self, letter, start_year, end_year, window_days=400, interpolate=True):
+    def outright_seasonality(self, symbol, letter, start_year, end_year, window_days=400, interpolate=True):
         self.db.cursor.execute(
             "SELECT DISTINCT contract_code FROM seac_settlements WHERE symbol = ? AND contract_code LIKE ?",
-            (self.symbol, f"{letter}%")
+            (symbol, f"{letter}%")
         )
         all_codes = [r[0] for r in self.db.cursor.fetchall()]
         codes = sorted(
@@ -51,13 +49,13 @@ class Seasonality:
         if not codes:
             return self._empty_result([f"no contracts found for {letter} in [{start_year},{end_year}]"])
 
-        hist = self.db.get_contract_history(self.symbol, codes)
+        hist = self.db.get_contract_history(symbol, codes)
         today = pd.Timestamp(pd.Timestamp.now().date())
 
         series_out, warnings, ref_ticks = {}, [], None
 
         for code, df in sorted(hist.items()):
-            expiry, window_start, window_end = self._leg_window(code, window_days)
+            expiry, window_start, window_end = self._leg_window(symbol, code, window_days)
             if expiry is None or df.empty:
                 warnings.append(f"{code}: skipped (no expiry estimate or no data)")
                 continue
@@ -89,7 +87,7 @@ class Seasonality:
 
     # ---------------- expression seasonality ----------------
 
-    def expression_seasonality(self, expression, start_year, end_year, window_days=400, interpolate=True):
+    def expression_seasonality(self, symbol, expression, start_year, end_year, window_days=400, interpolate=True):
         matches = re.findall(r"([FGHJKMNQUVXZ])(\d{2})", expression)
         if not matches:
             return self._empty_result(["could not parse expression"])
@@ -102,7 +100,7 @@ class Seasonality:
 
         for s in range(start_year, end_year + 1):
             anchor_code = f"{ref_month}{s % 100:02d}"
-            expiry, window_start, window_end = self._leg_window(anchor_code, window_days)
+            expiry, window_start, window_end = self._leg_window(symbol, anchor_code, window_days)
             if expiry is None:
                 warnings.append(f"{s}: no expiry estimate for anchor {anchor_code}")
                 continue
@@ -111,7 +109,7 @@ class Seasonality:
             for month, yy in matches:
                 offset = int(yy) - ref_year_in_expr
                 leg_code = f"{month}{(s + offset) % 100:02d}"
-                hist = self.db.get_contract_history(self.symbol, [leg_code])
+                hist = self.db.get_contract_history(symbol, [leg_code])
                 if leg_code not in hist or hist[leg_code].empty:
                     valid = False
                     warnings.append(f"{s}: missing data for leg {leg_code}")
