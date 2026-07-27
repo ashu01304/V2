@@ -17,7 +17,9 @@ class SeasonalityPlotter:
             template="plotly_dark", paper_bgcolor='black', plot_bgcolor='black',
             xaxis=dict(tickformat='%b %d', gridcolor='#333'),
             yaxis=dict(title="Price", gridcolor='#333'),
-            hovermode="x unified", title=title
+            hovermode="x unified", title=title,
+            height=900,      # Increase height (default is ~450-500)
+            width=900, # Increase width (default is ~800-
         )
         fig.show()
 
@@ -65,5 +67,7 @@ class SeasonalityPlotter:
             xaxis=dict(title="Month before expiry", tickvals=tickvals, ticktext=ticktext, gridcolor='#333'),
             yaxis=dict(title="Value", gridcolor='#333'),
             hovermode="x unified",
+            height=1000,      # Increase height (default is ~450-500)
+            width=2000,
         )
         fig.show()
