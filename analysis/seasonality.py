@@ -12,7 +12,7 @@ class Seasonality:
 
     def _fill_weekends(self, df, window_start, window_end):
         full_calendar = pd.date_range(window_start, window_end, freq='D')
-        return df.reindex(full_calendar).interpolate(method='linear').dropna()
+        return df.reindex(full_calendar).interpolate(method='linear', limit_direction='both')
 
     def _month_ticks(self, offsets, dates):
         tickvals, ticktext, seen = [], [], set()
@@ -181,9 +181,27 @@ class Seasonality:
     def _package(self, series_out, ref_ticks, warnings):
         if not series_out:
             return self._empty_result(warnings)
+        
+        # Create matrix: Index = Days to Expiry, Columns = Years
         combined = pd.concat(
             [s['value'].rename(y) for y, s in series_out.items()], axis=1
         ).sort_index()
+
+        # Statistical Calculations
         average = combined.mean(axis=1)
+        std_years = combined.std(axis=1)  # 1-sigma spread across years
+        
+        # Windowed SD of the mean (2 sigma of 30 previous points of the average path)
+        rolling_std_path = average.rolling(window=30, min_periods=30).std() * 2 + 0.5*std_years
+
         tickvals, ticktext = self._month_ticks(*ref_ticks) if ref_ticks else ([], [])
-        return {'series': series_out, 'average': average, 'ticks': (tickvals, ticktext), 'warnings': warnings}
+        
+        return {
+            'series': series_out, 
+            'average': average, 
+            'std': std_years,
+            'rolling_std_path': rolling_std_path,
+            'combined': combined,
+            'ticks': (tickvals, ticktext), 
+            'warnings': warnings
+        }
