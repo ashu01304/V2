@@ -37,19 +37,48 @@
 import pandas as pd
 import numpy as np
 
-
 class SeasonalStrategies:
-
     @staticmethod
-    def ashu01(hist_stats, live_trailing):
-        year_SD = live_trailing.tail(10).std()
-        year_MEAN = live_trailing.tail(21).mean()
-        curr_price = live_trailing.iloc[-1]
+    def ashu01_vectorized(rulebook, live_price):
+        """
+        Vectorized version of ashu01. 
+        Returns two series: 'signals' (1 for LONG, -1 for SHORT) and 'durations'.
+        """
+        # 1. Pre-calculate live indicators for the whole year
+        year_SD = live_price.rolling(10).std()
+        year_MEAN = live_price.rolling(21).mean()
 
-        if hist_stats.get('UpRate_5Y_3D',0.5) >= 0.8 and hist_stats.get('UpRate_10Y_3D',0.5) >= 0.7 and hist_stats.get('UpRate_5Y_6D',0.5) >= 0.6 and hist_stats.get('UpRate_10Y_6D',0.5) > 0.7 and curr_price <= hist_stats.get('Avg_5Y_Clean', curr_price) and curr_price <= year_MEAN - 0.5*year_SD:
-            return "LONG", 6
+        # 2. Define Helper to get columns safely with a default
+        def get_col(name, default=0.5):
+            return rulebook[name] if name in rulebook.columns else pd.Series(default, index=rulebook.index)
+
+        # 3. Create Boolean Masks for all conditions
+        # LONG Conditions
+        long_mask = (
+            (get_col('UpRate_5Y_3D') >= 0.8) & 
+            (get_col('UpRate_10Y_3D') >= 0.7) & 
+            (get_col('UpRate_5Y_6D') >= 0.6) & 
+            (get_col('UpRate_10Y_6D') > 0.7) & 
+            (live_price <= get_col('Avg_5Y_Clean', live_price)) & 
+            (live_price <= year_MEAN - 0.5 * year_SD)
+        )
+
+        # SHORT Conditions
+        short_mask = (
+            (get_col('UpRate_5Y_3D') <= 0.2) & 
+            (get_col('UpRate_10Y_3D') <= 0.3) & 
+            (get_col('UpRate_5Y_6D') <= 0.4) & 
+            (get_col('UpRate_10Y_6D') < 0.3) & 
+            (live_price >= get_col('Avg_5Y_Clean', live_price)) & 
+            (live_price >= year_MEAN + 0.5 * year_SD)
+        )
+
+        # 4. Generate Signal Output
+        signals = pd.Series(0, index=rulebook.index)
+        signals[long_mask] = 1   # 1 for LONG
+        signals[short_mask] = -1 # -1 for SHORT
         
-        elif hist_stats.get('UpRate_5Y_3D',0.5) <= 0.2 and hist_stats.get('UpRate_10Y_3D',0.5) <= 0.3 and hist_stats.get('UpRate_5Y_6D',0.5) <= 0.4 and hist_stats.get('UpRate_10Y_6D',0.5) < 0.3 and curr_price >= hist_stats.get('Avg_5Y_Clean', curr_price) and curr_price >= year_MEAN + 0.5*year_SD:
-            return "SHORT", 6
-        else:
-            return "NONE", 0
+        durations = pd.Series(0, index=rulebook.index)
+        durations[long_mask | short_mask] = 6 # Set fixed duration 6
+        
+        return signals, durations
