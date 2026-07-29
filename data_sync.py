@@ -12,14 +12,11 @@ def sync():
     print(f"Connecting to {url}...")
     
     try:
-        # 1. Fetch
         r = requests.get(url, verify=False, timeout=60)
         r.raise_for_status()
         text = r.text
         print(f"Downloaded {len(text) / 1024 / 1024:.2f} MB of data.")
 
-        # 2. Extract JSON from 'var seacdata={...};'
-        # This regex looks for the first '{' and goes to the very end
         start_index = text.find('{')
         end_index = text.rfind('}') + 1
         
@@ -31,7 +28,6 @@ def sync():
         data = json.loads(json_str)
         print("JSON parsed successfully.")
 
-        # 3. Parse into rows
         rows = []
         for sym, dates in data.items():
             for dt, contracts in dates.items():
@@ -44,13 +40,10 @@ def sync():
 
         print(f"Prepared {len(rows)} records for the database.")
 
-        # 4. Save to Database
         db = DatabaseManager()
-        # Clean old data to ensure a fresh start
         db.cursor.execute("DELETE FROM seac_settlements")
         db.save_seac_batch(rows)
         
-        # Verify
         db.cursor.execute("SELECT count(*) FROM seac_settlements")
         count = db.cursor.fetchone()[0]
         db.close()

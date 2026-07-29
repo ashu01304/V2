@@ -2,14 +2,12 @@ import re
 import pandas as pd
 from analysis.expiry import ExpiryEstimator
 
-
 class Seasonality:
     def __init__(self, db):
         self.db = db
         self.estimator = ExpiryEstimator(db)
 
-    # ---------------- shared helpers ----------------
-
+    # shared helpers
     def _fill_weekends(self, df, window_start, window_end):
         full_calendar = pd.date_range(window_start, window_end, freq='D')
         return df.reindex(full_calendar).interpolate(method='linear', limit_direction='both')
@@ -34,8 +32,7 @@ class Seasonality:
         window_end = min(expiry, today).normalize()
         return expiry, window_start, window_end
 
-    # ---------------- outright seasonality ----------------
-
+    # outright seasonality
     def outright_seasonality(self, symbol, letter, start_year, end_year, window_days=400, interpolate=True):
         self.db.cursor.execute(
             "SELECT DISTINCT contract_code FROM seac_settlements WHERE symbol = ? AND contract_code LIKE ?",
@@ -51,7 +48,6 @@ class Seasonality:
 
         hist = self.db.get_contract_history(symbol, codes)
         today = pd.Timestamp(pd.Timestamp.now().date())
-
         series_out, warnings, ref_ticks = {}, [], None
 
         for code, df in sorted(hist.items()):
@@ -85,8 +81,7 @@ class Seasonality:
 
         return self._package(series_out, ref_ticks, warnings)
 
-    # ---------------- expression seasonality ----------------
-
+    # expression seasonality
     def expression_seasonality(self, symbol, expression, start_year, end_year, window_days=400, interpolate=True):
         matches = re.findall(r"([FGHJKMNQUVXZ])(\d{2})", expression)
         if not matches:
@@ -173,8 +168,7 @@ class Seasonality:
                 continue
         return result.dropna()
 
-    # ---------------- packaging ----------------
-
+    # packaging
     def _empty_result(self, warnings):
         return {'series': {}, 'average': pd.Series(dtype=float), 'ticks': ([], []), 'warnings': warnings}
 
@@ -193,7 +187,6 @@ class Seasonality:
         
         # Windowed SD of the mean (2 sigma of 30 previous points of the average path)
         rolling_std_path = average.rolling(window=30, min_periods=30).std() * 2 + 0.5*std_years
-
         tickvals, ticktext = self._month_ticks(*ref_ticks) if ref_ticks else ([], [])
         
         return {
