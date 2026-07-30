@@ -49,7 +49,38 @@ class SeasonalStrategies:
         if hist_stats.get('UpRate_5Y_3D',0.5) >= 0.8 and hist_stats.get('UpRate_10Y_3D',0.5) >= 0.7 and hist_stats.get('UpRate_5Y_6D',0.5) >= 0.6 and hist_stats.get('UpRate_10Y_6D',0.5) > 0.7 and curr_price <= hist_stats.get('Avg_5Y_Clean', curr_price) and curr_price <= year_MEAN - 0.5*year_SD:
             return "LONG", 6
         
-        elif hist_stats.get('UpRate_5Y_3D',0.5) <= 0.2 and hist_stats.get('UpRate_10Y_3D',0.5) <= 0.3 and hist_stats.get('UpRate_5Y_6D',0.5) <= 0.4 and hist_stats.get('UpRate_10Y_6D',0.5) < 0.3 and curr_price >= hist_stats.get('Avg_5Y_Clean', curr_price) and curr_price >= year_MEAN + 0.5*year_SD:
+        elif hist_stats.get('UpRate_5Y_3D',0.5) <= 0.2 and hist_stats.get('UpRate_10Y_3D',0.5) <= 0.3 and hist_stats.get('UpRate_5Y_6D',0.5) <= 0.4 and hist_stats.get('UpRate_10Y_6D',0.5) < 0.3 and curr_price >= hist_stats.get('Avg_5Y_Clean', curr_price) and curr_price >= year_MEAN + 0.5*year_SD  :
             return "SHORT", 6
+        else:
+            return "NONE", 0
+
+    @staticmethod
+    def CO_Defly01(hist_stats, live_trailing): # its working fine on far months defly 
+        days = 6
+        if len(live_trailing) < 2:
+            return "NONE", 0
+
+        curr_price = live_trailing.iloc[-1]
+        last_day_price = live_trailing.iloc[-2]
+        year_SD = live_trailing.tail(21).std()
+        year_MEAN = live_trailing.tail(42).mean()
+        seac_avg_5c = hist_stats.get('Avg_5Y_Clean', curr_price)
+        seac_avg_10c = hist_stats.get('Avg_10Y_Clean', curr_price)
+        seac_sd_5 = hist_stats.get('STAT_Std_Dev', 0)
+        up_5_6D  = hist_stats.get('UpRate_5Y_6D',0.5)
+        up_5_10D = hist_stats.get('UpRate_5Y_10D',0.5)
+        up_5_15D = hist_stats.get('UpRate_5Y_15D',0.5)
+        up_5_20D = hist_stats.get('UpRate_5Y_20D',0.5)
+        up_10_6D  = hist_stats.get('UpRate_10Y_6D',0.5)
+        up_10_10D = hist_stats.get('UpRate_10Y_10D',0.5)
+        up_10_15D = hist_stats.get('UpRate_10Y_15D',0.5)
+        up_10_20D = hist_stats.get('UpRate_10Y_20D',0.5)
+
+        if curr_price <= year_MEAN - 1*year_SD and up_5_6D >= 0.6 and up_10_6D >= 0.6 and curr_price >= year_MEAN - 3*year_SD and curr_price <= seac_avg_5c : 
+            return "LONG", days
+
+        # elif curr_price >= year_MEAN + 1*year_SD and up_5_6D <= 0.4 and up_10_6D <= 0.4 and curr_price <= year_MEAN + 3*year_SD and curr_price >= seac_avg_5c and last_day_price - curr_price > 0.02: 
+        #     return "SHORT", days
+
         else:
             return "NONE", 0

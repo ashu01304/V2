@@ -58,6 +58,8 @@ class Seasonality:
 
             df = df.copy()
             df.index = pd.to_datetime(df.index).normalize()
+            if 2000 + int(code[1:]) == end_year:
+                window_end = min(window_end, df.index.max())
             windowed = df[(df.index >= window_start) & (df.index <= window_end)].sort_index()
             windowed = windowed[~windowed.index.duplicated(keep='last')]
             if windowed.empty:
@@ -112,6 +114,8 @@ class Seasonality:
 
                 df = hist[leg_code].copy()
                 df.index = pd.to_datetime(df.index).normalize()
+                if s == end_year:
+                    window_end = min(window_end, df.index.max())
                 windowed = df[(df.index >= window_start) & (df.index <= window_end)].sort_index()
                 windowed = windowed[~windowed.index.duplicated(keep='last')]
                 if windowed.empty:

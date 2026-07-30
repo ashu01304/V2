@@ -28,10 +28,10 @@ class SeasonalBacktester:
             if not hist_pool: continue
             
             # 3. Build Seasonal Rulebook (Historical Features)
-            hist_matrix = self.full_matrix[hist_pool]
-            anomaly_map = self.fc.get_anomaly_years(hist_matrix)
-            df_hist_features = self.fc.get_cleaned_averages(hist_matrix, anomaly_map)
-            stats_df = self.fc.calculate_stats(hist_matrix)
+            feature_matrix = self.full_matrix[hist_pool + [test_year]]
+            anomaly_map = self.fc.get_anomaly_years(feature_matrix)
+            df_hist_features = self.fc.get_cleaned_averages(feature_matrix, anomaly_map)
+            stats_df = self.fc.calculate_stats(feature_matrix)
             rulebook = df_hist_features.join(stats_df)
 
             # 4. Setup Live Data for Test Year
@@ -48,7 +48,7 @@ class SeasonalBacktester:
                 
                 # Context from the current year: 
                 # Slice the series from the beginning of the year up to the current day
-                live_trailing_data = live_price.iloc[:i+1] 
+                live_trailing_data = live_price.iloc[:i+1].dropna()
 
                 # Strategy decides: Signal (LONG/SHORT/NONE) and Duration
                 signal, duration = strategy_func(hist_today, live_trailing_data)
