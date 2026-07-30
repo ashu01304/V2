@@ -2,6 +2,12 @@ import pandas as pd
 import numpy as np
 
 class FeatureCreator:
+    def calculate_seasonality_features(self, combined_df):
+        average = combined_df.mean(axis=1)
+        std_years = combined_df.std(axis=1)
+        rolling_std_path = average.rolling(window=30, min_periods=30).std() * 2 + 0.5 * std_years
+        return average, std_years, rolling_std_path
+
     def get_anomaly_years(self, combined_df):
         """
         Identifies anomaly years based on correlation across three brackets:

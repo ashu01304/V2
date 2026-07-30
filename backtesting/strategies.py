@@ -79,8 +79,8 @@ class SeasonalStrategies:
         if curr_price <= year_MEAN - 1*year_SD and up_5_6D >= 0.6 and up_10_6D >= 0.6 and curr_price >= year_MEAN - 3*year_SD and curr_price <= seac_avg_5c : 
             return "LONG", days
 
-        # elif curr_price >= year_MEAN + 1*year_SD and up_5_6D <= 0.4 and up_10_6D <= 0.4 and curr_price <= year_MEAN + 3*year_SD and curr_price >= seac_avg_5c and last_day_price - curr_price > 0.02: 
-        #     return "SHORT", days
+        elif curr_price >= year_MEAN + 1*year_SD and up_5_6D <= 0.4 and up_10_6D <= 0.4 and curr_price <= year_MEAN + 3*year_SD and curr_price >= seac_avg_5c: 
+            return "SHORT", days
 
         else:
             return "NONE", 0
