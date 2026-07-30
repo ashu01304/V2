@@ -88,7 +88,7 @@ class SeasonalityPlotter:
         fig.update_layout(
             template="plotly_dark", paper_bgcolor='black', plot_bgcolor='black',
             title=title,
-            xaxis=dict(title="Month before expiry", tickvals=tickvals, ticktext=ticktext, gridcolor='#333'),
+            xaxis=dict(title=result.get("xaxis_title", "Month before expiry"), tickvals=tickvals, ticktext=ticktext, gridcolor='#333'),
             yaxis=dict(title="Value", gridcolor='#333'),
             hovermode="x unified",
             height=900, width=1600,
