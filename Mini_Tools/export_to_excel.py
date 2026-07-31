@@ -1,8 +1,12 @@
 import pandas as pd
 
-def export_to_excel(result, df_enhanced, filename="seasonality_analysis.xlsx"):
+def export_to_excel(result, df_enhanced=None, filename="seasonality_analysis.xlsx"):
     try:
-        df_export = df_enhanced.copy()
+        df_export = (
+            result['combined'].copy()
+            if df_enhanced is None
+            else df_enhanced.copy()
+        )
         df_export.index.name = "Days to Expiry"
 
         series_data = result.get('series', {})
@@ -14,7 +18,9 @@ def export_to_excel(result, df_enhanced, filename="seasonality_analysis.xlsx"):
                 df_export.insert(0, 'Current_Year_Date', current_date_map)
                 df_export['Current_Year_Date'] = pd.to_datetime(df_export['Current_Year_Date']).dt.strftime('%Y-%m-%d')
 
-        stat_cols = ['STAT_Average', 'STAT_Std_Dev', 'STAT_Rolling_2S']
+        stat_cols = [col for col in ['STAT_Average', 'STAT_Std_Dev', 'STAT_Rolling_2S']
+                     if col in df_export.columns
+        ]
         year_cols = [col for col in df_export.columns
             if isinstance(col, int)
         ]
@@ -28,9 +34,7 @@ def export_to_excel(result, df_enhanced, filename="seasonality_analysis.xlsx"):
             column_order.append('Current_Year_Date')
 
         column_order += year_cols + stat_cols + other_cols
-        df_export = df_export[column_order]
-
-        df_export = df_export.sort_index()
+        df_export = df_export[column_order].sort_index()
 
         with pd.ExcelWriter(filename, engine='openpyxl') as writer:
             df_export.to_excel(writer, sheet_name='Price Alignment')
