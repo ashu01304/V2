@@ -2,13 +2,11 @@ import re
 import numpy as np
 import pandas as pd
 from analysis.expiry import OfficialExpiryLookup
-from analysis.feature_creation import FeatureCreator
 
 class Seasonality:
     def __init__(self, db):
         self.db = db
         self.official_expiry = OfficialExpiryLookup()
-        self.fc = FeatureCreator()
 
     # shared helpers
     def _fill_weekends(self, df, window_start, window_end):
@@ -269,7 +267,7 @@ class Seasonality:
 
     # packaging
     def _empty_result(self, warnings):
-        return {'series': {}, 'average': pd.Series(dtype=float), 'ticks': ([], []), 'warnings': warnings}
+        return {'series': {},'combined': pd.DataFrame(), 'ticks': ([], []), 'warnings': warnings}
 
     def _package(self, series_out, ref_ticks, warnings):
         if not series_out:
@@ -280,16 +278,12 @@ class Seasonality:
             [s['value'].rename(y) for y, s in series_out.items()], axis=1
         ).sort_index()
 
-        average, std_years, rolling_std_path = self.fc.calculate_seasonality_features(combined)
         tickvals, ticktext = self._month_ticks(*ref_ticks) if ref_ticks else ([], [])
         
         return {
-            'series': series_out, 
-            'average': average, 
-            'std': std_years,
-            'rolling_std_path': rolling_std_path,
+            'series': series_out,
             'combined': combined,
-            'ticks': (tickvals, ticktext), 
+            'ticks': (tickvals, ticktext),
             'warnings': warnings
         }
 
@@ -301,7 +295,6 @@ class Seasonality:
             [s["value"].rename(y) for y, s in series_out.items()], axis=1
         ).sort_index()
         combined = raw_combined.interpolate(method="linear", limit_area="inside")
-        average, std_years, rolling_std_path = self.fc.calculate_seasonality_features(combined)
 
         tickvals = [-window_days, -300, -200, -100, 0]
         tickvals = [t for t in tickvals if -window_days <= t <= 0]
@@ -309,9 +302,6 @@ class Seasonality:
 
         return {
             "series": series_out,
-            "average": average,
-            "std": std_years,
-            "rolling_std_path": rolling_std_path,
             "raw_combined": raw_combined,
             "combined": combined,
             "ticks": (tickvals, ticktext),

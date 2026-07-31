@@ -102,21 +102,30 @@ class FeatureCreator:
         return all_ranks[current_year]
 
     def calculate_stats(self, combined_df):
-        """Calculates UpRate, Expected Value, and Max Drawdown (MAE)."""
         # Ensure moving forward in time (-400 to 0)
         df = combined_df.copy().sort_index()
-        hist_years = sorted([c for c in df.columns if isinstance(c, (int, float))])[:-1]
+        year_cols = sorted([
+            c for c in df.columns
+            if isinstance(c, (int, np.integer))
+        ])
+        year_df = df[year_cols]
+        hist_years = year_cols[:-1]
         
         intervals = [3, 6, 10, 15, 21]
         brackets = [('5Y', 5, 0), ('10Y', 10, 6), ('15Y', 15, 11)]
         stat_results = pd.DataFrame(index=df.index)
+        # Calculate Average, SD and Rolling 2S
+        average, std_years, rolling_std_path = self.calculate_seasonality_features(year_df)
+        stat_results['STAT_Average'] = average
+        stat_results['STAT_Std_Dev'] = std_years
+        stat_results['STAT_Rolling_2S'] = rolling_std_path
 
         for days in intervals:
             # Price at exact end of window
-            future_price = df.shift(-days)
+            future_price = year_df.shift(-days)
             # Forward-looking rolling minimum for Max Drawdown
             # We reverse the DF, take rolling min, and reverse back to look 'ahead'
-            rolling_min = df.iloc[::-1].rolling(window=days+1, min_periods=1).min().iloc[::-1]
+            rolling_min = year_df.iloc[::-1].rolling(window=days+1, min_periods=1).min().iloc[::-1]
 
             for label, window, min_req in brackets:
                 subset = hist_years[-window:]
@@ -126,15 +135,20 @@ class FeatureCreator:
                     continue
 
                 # 1. Directional Stats (UpRate & Expected)
-                diffs_at_end = future_price[subset] - df[subset]
-                stat_results[f"UpRate_{label}_{days}D"] = (diffs_at_end > 0).sum(axis=1) / diffs_at_end.notna().sum(axis=1)
+                diffs_at_end = future_price[subset] - year_df[subset]
+                valid_count = diffs_at_end.notna().sum(axis=1)
+                stat_results[f"UpRate_{label}_{days}D"] = (
+                    (diffs_at_end > 0).sum(axis=1)
+                    / valid_count.replace(0, np.nan)
+                )
                 stat_results[f"Expected_{label}_{days}D"] = diffs_at_end.mean(axis=1)
 
                 # 2. Risk Stats (Max Drawdown / MAE)
                 # Drawdown = Lowest point in window - Price at start
-                drawdowns = rolling_min[subset] - df[subset]
-                # We cap drawdown at 0 (if price only went up, max drop is 0)
+                drawdowns = rolling_min[subset] - year_df[subset]
+                # We cap drawdown at 0
                 drawdowns = drawdowns.clip(upper=0)
                 stat_results[f"MaxDrawdown_{label}_{days}D"] = drawdowns.mean(axis=1)
 
         return stat_results
+    

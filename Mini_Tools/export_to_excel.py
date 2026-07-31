@@ -14,10 +14,21 @@ def export_to_excel(result, df_enhanced, filename="seasonality_analysis.xlsx"):
                 df_export.insert(0, 'Current_Year_Date', current_date_map)
                 df_export['Current_Year_Date'] = pd.to_datetime(df_export['Current_Year_Date']).dt.strftime('%Y-%m-%d')
 
-        insert_at = 1 if 'Current_Year_Date' in df_export.columns else 0
-        df_export.insert(insert_at, 'STAT_Average', result.get('average', pd.Series(dtype=float)))
-        df_export.insert(insert_at + 1, 'STAT_Std_Dev', result.get('std', pd.Series(dtype=float)))
-        df_export.insert(insert_at + 2, 'STAT_Rolling_2Sigma_Path', result.get('rolling_std_path', pd.Series(dtype=float)))
+        stat_cols = ['STAT_Average', 'STAT_Std_Dev', 'STAT_Rolling_2S']
+        year_cols = [col for col in df_export.columns
+            if isinstance(col, int)
+        ]
+        other_cols = [ col for col in df_export.columns
+            if col not in year_cols + stat_cols
+            and col != 'Current_Year_Date'
+        ]
+        column_order = []
+
+        if 'Current_Year_Date' in df_export.columns:
+            column_order.append('Current_Year_Date')
+
+        column_order += year_cols + stat_cols + other_cols
+        df_export = df_export[column_order]
 
         df_export = df_export.sort_index()
 

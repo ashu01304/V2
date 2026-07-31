@@ -36,7 +36,7 @@ class SeasonalBacktester:
 
             # 4. Setup Live Data for Test Year
             live_price = self.full_matrix[test_year]
-            date_map = self.result['series'][test_year]['date']
+            date_map = self.result['series'][test_year]['date'].reindex(self.full_matrix.index).interpolate(method='linear')
 
             # 5. Daily Loop
             # We use enumerate to easily slice the "trailing" data up to today
