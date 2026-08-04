@@ -37,6 +37,7 @@ class SeasonalBacktester:
             # 4. Setup Live Data for Test Year
             live_price = self.full_matrix[test_year]
             date_map = self.result['series'][test_year]['date'].reindex(self.full_matrix.index).interpolate(method='linear')
+            next_entry_day = None
 
             # 5. Daily Loop
             # We use enumerate to easily slice the "trailing" data up to today
@@ -44,11 +45,20 @@ class SeasonalBacktester:
                 if pd.isna(live_price.loc[day]): continue
                 
                 # Context from the past
-                hist_today = rulebook.loc[day]
+                hist_today = rulebook.loc[day].copy()
                 
                 # Context from the current year: 
                 # Slice the series from the beginning of the year up to the current day
                 live_trailing_data = live_price.iloc[:i+1].dropna()
+
+                # Live technical features use only prices available through today.
+                live_features = self.fc.calculate_live_technical_features(live_trailing_data, window_bb=35, window_rsi=14)
+                hist_today = pd.concat([hist_today, live_features])
+                hist_today['DAYS_TO_EXPIRY'] = abs(day)
+
+                # Do not open another position before the current one exits.
+                if next_entry_day is not None and day < next_entry_day:
+                    continue
 
                 # Strategy decides: Signal (LONG/SHORT/NONE) and Duration
                 signal, duration = strategy_func(hist_today, live_trailing_data)
@@ -77,5 +87,6 @@ class SeasonalBacktester:
                         # Add historical features for manual auditing
                         trade_log.update(hist_today.to_dict())
                         all_trades.append(trade_log)
+                        next_entry_day = exit_day
 
         return pd.DataFrame(all_trades)

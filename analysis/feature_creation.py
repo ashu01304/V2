@@ -2,6 +2,29 @@ import pandas as pd
 import numpy as np
 
 class FeatureCreator:
+    def calculate_live_technical_features(self, live_trailing, window_bb=20, window_rsi=14):
+        """Calculate point-in-time technical features from data available so far."""
+        live = live_trailing.dropna().sort_index()
+        if live.empty:
+            return pd.Series({"TECH_ZScore": np.nan, "TECH_RSI": np.nan})
+
+        sma = live.rolling(window=window_bb).mean()
+        std = live.rolling(window=window_bb).std()
+        z_score = (live - sma) / std
+
+        # Keep the same simple rolling-average RSI definition used in the notebook.
+        delta = live.diff()
+        gain = delta.clip(lower=0).rolling(window_rsi).mean()
+        loss = (-delta.clip(upper=0)).rolling(window_rsi).mean()
+        rs = gain / loss.replace(0, np.nan)
+        rsi = 100 - (100 / (1 + rs))
+        rsi.loc[(loss == 0) & (gain > 0)] = 100
+
+        return pd.Series({
+            "TECH_ZScore": z_score.iloc[-1],
+            "TECH_RSI": rsi.iloc[-1],
+        })
+
     def calculate_seasonality_features(self, combined_df):
         average = combined_df.mean(axis=1)
         std_years = combined_df.std(axis=1)
@@ -115,7 +138,9 @@ class FeatureCreator:
         brackets = [('5Y', 5, 0), ('10Y', 10, 6), ('15Y', 15, 11)]
         stat_results = pd.DataFrame(index=df.index)
         # Calculate Average, SD and Rolling 2S
-        average, std_years, rolling_std_path = self.calculate_seasonality_features(year_df)
+        # Historical benchmarks must exclude the current/test year.
+        hist_year_df = year_df[hist_years]
+        average, std_years, rolling_std_path = self.calculate_seasonality_features(hist_year_df)
         stat_results['STAT_Average'] = average
         stat_results['STAT_Std_Dev'] = std_years
         stat_results['STAT_Rolling_2S'] = rolling_std_path
