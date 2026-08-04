@@ -8,8 +8,10 @@ class SeasonalBacktester:
         self.full_matrix = result_dict['combined']
         self.fc = FeatureCreator()
 
-    def run_walk_forward(self, strategy_func, data_start_year, test_start_year):
+    def run_walk_forward(self, strategy_func, data_start_year, test_start_year,
+                         features=None, strategy_config=None):
         all_trades = []
+        strategy_config = strategy_config or {}
         
         # 1. Filter years based on Data Start Year
         available_years = sorted([y for y in self.full_matrix.columns if y >= data_start_year])
@@ -29,10 +31,15 @@ class SeasonalBacktester:
             
             # 3. Build Seasonal Rulebook (Historical Features)
             feature_matrix = self.full_matrix[hist_pool + [test_year]]
-            anomaly_map = self.fc.get_anomaly_years(feature_matrix)
-            df_hist_features = self.fc.get_cleaned_averages(feature_matrix, anomaly_map)
-            stats_df = self.fc.calculate_stats(feature_matrix)
-            rulebook = df_hist_features.join(stats_df)
+            if features is None:
+                anomaly_map = self.fc.get_anomaly_years(feature_matrix)
+                rulebook = self.fc.get_cleaned_averages(feature_matrix, anomaly_map).join(
+                    self.fc.calculate_stats(feature_matrix)
+                )
+            else:
+                historical = {name: config for name, config in features.items()
+                              if not name.startswith(("TECH_", "LIVE_"))}
+                rulebook = self.fc.create_historical_features(feature_matrix, historical)
 
             # 4. Setup Live Data for Test Year
             live_price = self.full_matrix[test_year]
@@ -52,7 +59,9 @@ class SeasonalBacktester:
                 live_trailing_data = live_price.iloc[:i+1].dropna()
 
                 # Live technical features use only prices available through today.
-                live_features = self.fc.calculate_live_technical_features(live_trailing_data, window_bb=35, window_rsi=14)
+                live_features = (self.fc.calculate_live_technical_features(
+                    live_trailing_data, window_bb=35, window_rsi=14
+                ) if features is None else self.fc.create_live_features(live_trailing_data, features))
                 hist_today = pd.concat([hist_today, live_features])
                 hist_today['DAYS_TO_EXPIRY'] = abs(day)
 
@@ -61,7 +70,7 @@ class SeasonalBacktester:
                     continue
 
                 # Strategy decides: Signal (LONG/SHORT/NONE) and Duration
-                signal, duration = strategy_func(hist_today, live_trailing_data)
+                signal, duration = strategy_func(hist_today, live_trailing_data, **strategy_config)
 
                 if signal != "NONE" and duration > 0:
                     exit_day = day + duration

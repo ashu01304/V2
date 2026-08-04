@@ -2,27 +2,55 @@ import pandas as pd
 import numpy as np
 
 class FeatureCreator:
-    def calculate_live_technical_features(self, live_trailing, window_bb=20, window_rsi=14):
-        """Calculate point-in-time technical features from data available so far."""
+    def create_historical_features(self, combined_df, features):
+        """Create only requested historical feature families."""
+        names = set(features)
+        output = pd.DataFrame(index=combined_df.index)
+
+        clean_names = names & {"Avg_5y_Clean", "Avg_10y_Clean", "Avg_15y_Clean"}
+        if clean_names:
+            cleaned = self.get_cleaned_averages(combined_df, self.get_anomaly_years(combined_df))
+            output[list(clean_names)] = cleaned[list(clean_names)]
+
+        stat_names = [name for name in names if name.startswith(("STAT_", "UpRate_", "Expected_", "MaxDrawdown_"))]
+        if stat_names:
+            stats = self.calculate_stats(combined_df)
+            output[stat_names] = stats[stat_names]
+
+        if "Current_Rank" in names:
+            output["Current_Rank"] = self.calculate_current_rank(combined_df)
+        return output
+
+    def create_live_features(self, live_trailing, features):
+        """Create only the requested live features."""
         live = live_trailing.dropna().sort_index()
-        if live.empty:
-            return pd.Series({"TECH_ZScore": np.nan, "TECH_RSI": np.nan})
+        output = {}
 
-        sma = live.rolling(window=window_bb).mean()
-        std = live.rolling(window=window_bb).std()
-        z_score = (live - sma) / std
+        if "TECH_ZScore" in features:
+            window = features["TECH_ZScore"].get("window", 20)
+            mean = live.rolling(window).mean()
+            std = live.rolling(window).std()
+            output["TECH_ZScore"] = ((live - mean) / std).iloc[-1]
 
-        # Keep the same simple rolling-average RSI definition used in the notebook.
-        delta = live.diff()
-        gain = delta.clip(lower=0).rolling(window_rsi).mean()
-        loss = (-delta.clip(upper=0)).rolling(window_rsi).mean()
-        rs = gain / loss.replace(0, np.nan)
-        rsi = 100 - (100 / (1 + rs))
-        rsi.loc[(loss == 0) & (gain > 0)] = 100
+        if "TECH_RSI" in features:
+            window = features["TECH_RSI"].get("window", 14)
+            delta = live.diff()
+            gain = delta.clip(lower=0).rolling(window).mean()
+            loss = (-delta.clip(upper=0)).rolling(window).mean()
+            rs = gain / loss.replace(0, np.nan)
+            rsi = 100 - (100 / (1 + rs))
+            rsi.loc[(loss == 0) & (gain > 0)] = 100
+            output["TECH_RSI"] = rsi.iloc[-1]
 
-        return pd.Series({
-            "TECH_ZScore": z_score.iloc[-1],
-            "TECH_RSI": rsi.iloc[-1],
+        if "LIVE_STD" in features:
+            output["LIVE_STD"] = live.tail(features["LIVE_STD"].get("window", 20)).std()
+
+        return pd.Series(output, dtype=float)
+
+    def calculate_live_technical_features(self, live_trailing, window_bb=20, window_rsi=14):
+        return self.create_live_features(live_trailing, {
+            "TECH_ZScore": {"window": window_bb},
+            "TECH_RSI": {"window": window_rsi},
         })
 
     def calculate_seasonality_features(self, combined_df):

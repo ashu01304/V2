@@ -41,20 +41,17 @@ import numpy as np
 class SeasonalStrategies:
 
     @staticmethod
-    def technical_zscore_rsi(hist_stats, live_trailing):
+    def technical_zscore_rsi(hist_stats, live_trailing, holding_days=5,
+                             z_score_threshold=1.85, upper_rsi=65,
+                             lower_rsi=35, stop_before_expiry=63):
         """Trade live Z-score extremes confirmed by the existing RSI definition."""
-        holding_days = 5
-        z_score_threshold = 1.85
-        upper_rsi = 65
-        lower_rsi = 35
-
         z_score = hist_stats.get('TECH_ZScore', np.nan)
         rsi = hist_stats.get('TECH_RSI', np.nan)
         days_to_expiry = hist_stats.get('DAYS_TO_EXPIRY', np.nan)
         if pd.isna(z_score) or pd.isna(rsi) or pd.isna(days_to_expiry):
             return "NONE", 0
 
-        if days_to_expiry < 63:
+        if days_to_expiry < stop_before_expiry:
             return "NONE", 0
 
         if z_score <= -z_score_threshold and rsi <= lower_rsi:
