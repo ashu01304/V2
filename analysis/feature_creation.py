@@ -152,6 +152,23 @@ class FeatureCreator:
         all_ranks = combined_df[year_cols].rank(axis=1, ascending=False, method='min')
         return all_ranks[current_year]
 
+    def calculate_average_forward_slope(self, combined_df, days=10, years=None,
+                                        drop_least_correlated=0.2):
+        df = combined_df.sort_index()
+        year_cols = sorted(c for c in df.columns if isinstance(c, (int, np.integer)))
+        current = year_cols[-1]
+        historical = year_cols[:-1]
+        if years is not None:
+            historical = historical[-years:]
+        if not historical:
+            return pd.Series(np.nan, index=df.index)
+        drop_count = int(len(historical) * drop_least_correlated)
+        if drop_count:
+            correlations = df[historical].corrwith(df[current]).fillna(-np.inf)
+            excluded = set(correlations.nsmallest(drop_count).index)
+            historical = [year for year in historical if year not in excluded]
+        return ((df[historical].shift(-days) - df[historical]) / days).mean(axis=1)
+
     def calculate_stats(self, combined_df):
         # Ensure moving forward in time (-400 to 0)
         df = combined_df.copy().sort_index()

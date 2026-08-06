@@ -2,6 +2,41 @@ import json
 import pandas as pd
 import numpy as np
 import math
+import re
+
+
+def _validate_expression_history(sznlty, symbol, expression, start_year, end_year):
+    matches = re.findall(r"([FGHJKMNQUVXZ])(\d{2})", expression)
+    if not matches:
+        return False, "could not parse expression"
+
+    ref_month, ref_yy = matches[0]
+    ref_year_in_expr = int(ref_yy)
+    years = sznlty._contract_years(symbol, ref_month, start_year, end_year)
+    if not years:
+        return False, "no anchor contracts found in the requested year range"
+
+    for year in years:
+        leg_codes = {
+            f"{month}{(year + int(yy) - ref_year_in_expr) % 100:02d}"
+            for month, yy in matches
+        }
+        histories = sznlty.db.get_contract_history(symbol, sorted(leg_codes))
+        missing = sorted(
+            code for code in leg_codes
+            if code not in histories or histories[code].empty
+        )
+        if missing:
+            return False, f"{year}: missing data for leg(s) {', '.join(missing)}"
+
+        common_dates = None
+        for code in leg_codes:
+            dates = histories[code].index
+            common_dates = dates if common_dates is None else common_dates.intersection(dates)
+        if common_dates is None or common_dates.empty:
+            return False, f"{year}: no overlapping dates across legs"
+
+    return True, None
 
 def _calculate_weighted_value(yearly_map):
     years = sorted(yearly_map.keys())
@@ -27,6 +62,9 @@ def get_stability_metrics(sznlty, symbol, expression, start_year, end_year, wind
     df_data = result['combined']
     year_cols = [c for c in df_data.columns if str(c).isdigit() and len(str(c)) == 4]
     df_clean = df_data[year_cols][df_data.index <= -cutoff].sort_index()
+
+    if df_clean.empty or not year_cols:
+        raise ValueError("no usable complete-leg history for scoring")
 
     windowed_changes = []
     yearly_raw_changes = {year: [] for year in year_cols}
@@ -88,25 +126,45 @@ def score_expression_universe(sznlty, symbol, start_year, end_year, window_days,
                               score_function=get_stability_metrics,
                               expressions_file="contracts_list.json", output_file="temp.xlsx"):
     with open(expressions_file, encoding="utf-8") as file:
-        expressions = json.load(file)
+        expression_data = json.load(file)
+
+    expressions = [
+        {"Contract": contract, "Strategy": strategy, "Expression": expression}
+        for contract, strategies in expression_data["contracts"].items()
+        for strategy in expression_data["columns"]
+        for expression in [strategies[strategy]]
+    ]
 
     scores, errors = [], []
-    for expression in expressions:
+    for item in expressions:
+        contract = item["Contract"]
+        strategy = item["Strategy"]
+        expression = item["Expression"]
         try:
+            valid, reason = _validate_expression_history(
+                sznlty, symbol, expression, start_year, end_year
+            )
+            if not valid:
+                errors.append({**item, "Error": reason})
+                continue
+
             metrics = score_function(sznlty, symbol, expression, start_year, end_year, window_days)
-            scores.append({"Expression": expression,
+            scores.append({"Contract": contract,
+                           "Strategy": strategy,
+                           "Expression": expression,
                            **metrics["stability_scores"].round(1).to_dict(),
                            "Latest_Score": metrics["latest_score"],
                            "Trend_Score": metrics["trend_score"],
                            "Neighboring_Buckets_Score": metrics["neighboring_score"],
                            "Calculated_Threshold": metrics["calculated_threshold"]})
         except Exception as error:
-            errors.append({"Expression": expression, "Error": str(error)})
+            errors.append({**item, "Error": str(error)})
 
     score_table = pd.DataFrame(scores)
     with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
         score_table.to_excel(writer, index=False)
-        column = score_table.columns.get_loc("Calculated_Threshold") + 1
-        for cell in writer.sheets["Sheet1"].iter_cols(min_col=column, max_col=column, min_row=2):
-            cell[0].number_format = "0.000"
+        if "Calculated_Threshold" in score_table.columns:
+            column = score_table.columns.get_loc("Calculated_Threshold") + 1
+            for cell in writer.sheets["Sheet1"].iter_cols(min_col=column, max_col=column, min_row=2):
+                cell[0].number_format = "0.000"
     return score_table, pd.DataFrame(errors)

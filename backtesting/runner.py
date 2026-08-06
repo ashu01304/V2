@@ -1,7 +1,6 @@
 import pandas as pd
 
 from analysis.seasonality import Seasonality
-from backtesting.engine import SeasonalBacktester
 from backtesting.risk_engine import RiskManagedBacktester
 from database.manager import DatabaseManager
 
@@ -9,7 +8,7 @@ from database.manager import DatabaseManager
 def run_backtest(symbol, data_start_year, test_start_year, data_end_year, window_days,
                  strategy_func, features, strategy_config, engine="risk",
                  engine_config=None, expression=None, minimum_latest_score=0,
-                 minimum_trend_score=0, scores_file="temp.xlsx",
+                 minimum_trend_score=0, Neighboring_Buckets_Score=0, scores_file="temp.xlsx",
                  seasonality_function="working_day_expression_seasonality",
                  output_file="backtest_report.xlsx"):
     engine_config = engine_config or {}
@@ -18,7 +17,8 @@ def run_backtest(symbol, data_start_year, test_start_year, data_end_year, window
     else:
         universe = pd.read_excel(scores_file)
         universe = universe[(universe["Latest_Score"] >= minimum_latest_score)
-                            & (universe["Trend_Score"] >= minimum_trend_score)]
+                            & (universe["Trend_Score"] >= minimum_trend_score)
+                            & (universe["Neighboring_Buckets_Score"] >= Neighboring_Buckets_Score)]
 
     all_trades, errors = [], []
     db = DatabaseManager()
@@ -37,13 +37,8 @@ def run_backtest(symbol, data_start_year, test_start_year, data_end_year, window
                         strategy_func, data_start_year, test_start_year,
                         features=features, strategy_config=strategy_config, **engine_config
                     )
-                elif engine == "fixed":
-                    trades = SeasonalBacktester(result).run_walk_forward(
-                        strategy_func, data_start_year, test_start_year,
-                        features=features, strategy_config=strategy_config
-                    )
                 else:
-                    raise ValueError("engine must be 'risk' or 'fixed'")
+                    raise ValueError("engine must be 'risk' ")
 
                 if not trades.empty:
                     trades.insert(0, "Expression", current_expression)
