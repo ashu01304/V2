@@ -1,7 +1,7 @@
-import re
 import numpy as np
 import pandas as pd
 from analysis.expiry import OfficialExpiryLookup
+from analysis.expression import evaluate_expression, parse_expression, shift_contract_year
 
 class Seasonality:
     def __init__(self, db):
@@ -20,12 +20,13 @@ class Seasonality:
         return years
 
     def working_day_expression_seasonality(self, symbol, expression, start_year, end_year=None, window_days=400):
-        matches = re.findall(r"([FGHJKMNQUVXZ])(\d{2})", expression)
-        if not matches:
+        legs = parse_expression(expression)
+        if not legs:
             return self._empty_result(["could not parse expression"])
 
-        ref_month, ref_yy = matches[0]
-        ref_year_in_expr = int(ref_yy)
+        ref_code = legs[0][1]
+        ref_month = ref_code[0]
+        ref_year_in_expr = int(ref_code[1:])
         series_out, warnings = {}, []
         years = self._contract_years(symbol, ref_month, start_year, end_year)
 
@@ -39,9 +40,8 @@ class Seasonality:
             expiry = self._official_or_last_date(symbol, anchor_code, anchor_hist)
             leg_data, valid = {}, True
 
-            for month, yy in matches:
-                offset = int(yy) - ref_year_in_expr
-                leg_code = f"{month}{(s + offset) % 100:02d}"
+            for _, contract in legs:
+                leg_code = shift_contract_year(contract, s % 100 - ref_year_in_expr)
                 hist = self.db.get_contract_history(symbol, [leg_code])
                 if leg_code not in hist or hist[leg_code].empty:
                     valid = False
@@ -50,7 +50,7 @@ class Seasonality:
 
                 df = hist[leg_code].copy()
                 df.index = pd.to_datetime(df.index).normalize()
-                leg_data[f"{month}{yy}"] = df["Close"]
+                leg_data[contract] = df["Close"]
 
             if not valid:
                 continue
@@ -60,7 +60,7 @@ class Seasonality:
                 warnings.append(f"{s}: no overlapping dates across legs")
                 continue
 
-            result = self._evaluate_expression(expression, leg_df)
+            result = evaluate_expression(expression, leg_df)
             result = result[result.index <= expiry]
             if result.empty:
                 warnings.append(f"{s}: expression evaluated to empty series")
@@ -83,23 +83,6 @@ class Seasonality:
             }, index=days_to_expiry)
 
         return self._package_working_days(series_out, warnings, window_days)
-
-    def _evaluate_expression(self, expression, leg_df):
-        clean_expr = expression.replace(" ", "").replace("-", "+-")
-        terms = [p for p in clean_expr.split("+") if p]
-        result = pd.Series(0.0, index=leg_df.index)
-        for term in terms:
-            try:
-                if "*" in term:
-                    coeff, token = term.split("*")
-                    result += float(coeff) * leg_df[token]
-                elif term.startswith("-"):
-                    result -= leg_df[term[1:]]
-                else:
-                    result += leg_df[term.lstrip("+")]
-            except Exception:
-                continue
-        return result.dropna()
 
     def _official_or_last_date(self, symbol, contract_code, history):
         official = self.official_expiry.get(symbol, contract_code)

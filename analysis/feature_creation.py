@@ -152,6 +152,17 @@ class FeatureCreator:
         all_ranks = combined_df[year_cols].rank(axis=1, ascending=False, method='min')
         return all_ranks[current_year]
 
+    def calculate_current_rank_ratio(self, combined_df, years=None):
+        year_cols = sorted(c for c in combined_df.columns if isinstance(c, (int, np.integer)))
+        if years is not None:
+            year_cols = year_cols[-years:]
+        current_year = year_cols[-1]
+        values = combined_df[year_cols]
+        return pd.DataFrame({
+            "Rank": values.rank(axis=1, ascending=False, method="min")[current_year],
+            "Count": values.notna().sum(axis=1),
+        }, index=combined_df.index)
+
     def calculate_average_forward_slope(self, combined_df, days=10, years=None,
                                         drop_least_correlated=0.2):
         df = combined_df.sort_index()

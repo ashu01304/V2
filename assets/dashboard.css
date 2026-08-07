@@ -1,0 +1,58 @@
+body {
+    margin: 0;
+    background: #0b1220;
+    font-family: Arial, sans-serif;
+}
+
+h3 { margin: 0 0 8px; font-size: 16px; }
+
+.control-row {
+    display: flex;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 7px;
+}
+
+.control-group { width: 105px; }
+.control-group > span {
+    display: block;
+    margin-bottom: 2px;
+    color: #cbd5e1;
+    font-size: 11px;
+}
+
+.control-input,
+.product-dropdown,
+.product-dropdown .Select-control {
+    width: 105px !important;
+    height: 30px;
+    min-height: 30px;
+    box-sizing: border-box;
+    color: #f8fafc !important;
+    background: #17243a !important;
+    border-color: #475569 !important;
+}
+
+.control-input { padding: 0 7px; border: 1px solid; border-radius: 3px; }
+.product-dropdown .Select-value-label,
+.product-dropdown .Select-placeholder,
+.product-dropdown .Select-input > input { color: #f8fafc !important; }
+.product-dropdown .Select-menu-outer,
+.product-dropdown .VirtualizedSelectOption { color: #f8fafc; background: #17243a; }
+.product-dropdown .VirtualizedSelectFocusedOption { background: #334155; }
+
+.apply-button {
+    height: 30px;
+    padding: 0 12px;
+    color: #e2e8f0;
+    background: #1e293b;
+    border: 1px solid #475569;
+    border-radius: 3px;
+    cursor: pointer;
+}
+.columns-panel { margin-bottom: 7px; color: #cbd5e1; font-size: 12px; }
+.columns-panel summary { width: max-content; cursor: pointer; }
+.columns-panel > div { padding-top: 5px; }
+.columns-panel label { color: #e2e8f0 !important; }
+.columns-panel input { accent-color: #64748b; }

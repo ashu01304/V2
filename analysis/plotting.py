@@ -24,6 +24,13 @@ class SeasonalityPlotter:
         fig.show()
 
     def plot_seasonality(self, result, title="Seasonality"):
+        fig = self.build_seasonality_figure(result, title)
+        if fig is None:
+            print("Nothing to plot.")
+            return
+        fig.show()
+
+    def build_seasonality_figure(self, result, title="Seasonality"):
         for warning in result.get('warnings', []):
             print(f"⚠️ {warning}")
 
@@ -32,8 +39,7 @@ class SeasonalityPlotter:
         std = result.get('std')
         rolling_2s = result.get('rolling_std_path')
         if not series and average is None:
-            print("Nothing to plot.")
-            return
+            return None
 
         fig = go.Figure()
         tickvals, ticktext = result.get('ticks', ([], []))
@@ -96,4 +102,4 @@ class SeasonalityPlotter:
             hovermode="x unified",
             height=900, width=1600,
         )
-        fig.show()
+        return fig

@@ -2,24 +2,25 @@ import json
 import pandas as pd
 import numpy as np
 import math
-import re
+from analysis.expression import parse_expression, shift_contract_year
 
 
 def _validate_expression_history(sznlty, symbol, expression, start_year, end_year):
-    matches = re.findall(r"([FGHJKMNQUVXZ])(\d{2})", expression)
-    if not matches:
+    legs = parse_expression(expression)
+    if not legs:
         return False, "could not parse expression"
 
-    ref_month, ref_yy = matches[0]
-    ref_year_in_expr = int(ref_yy)
+    ref_code = legs[0][1]
+    ref_month = ref_code[0]
+    ref_year_in_expr = int(ref_code[1:])
     years = sznlty._contract_years(symbol, ref_month, start_year, end_year)
     if not years:
         return False, "no anchor contracts found in the requested year range"
 
     for year in years:
         leg_codes = {
-            f"{month}{(year + int(yy) - ref_year_in_expr) % 100:02d}"
-            for month, yy in matches
+            shift_contract_year(contract, year % 100 - ref_year_in_expr)
+            for _, contract in legs
         }
         histories = sznlty.db.get_contract_history(symbol, sorted(leg_codes))
         missing = sorted(
