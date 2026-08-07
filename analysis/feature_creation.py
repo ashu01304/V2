@@ -180,6 +180,18 @@ class FeatureCreator:
             historical = [year for year in historical if year not in excluded]
         return ((df[historical].shift(-days) - df[historical]) / days).mean(axis=1)
 
+    def calculate_bollinger_signal(self, live_series, window=45):
+        trailing = live_series.dropna().sort_index().tail(window)
+        if len(trailing) < window:
+            return {"percent_b": np.nan, "signal": None}
+        average = trailing.mean()
+        std = trailing.std(ddof=1)
+        if pd.isna(std) or std == 0:
+            return {"percent_b": np.nan, "signal": None}
+        percent_b = (trailing.iloc[-1] - (average - 2 * std)) / (4 * std)
+        signal = "LONG" if percent_b <= 0.20 else "SHORT" if percent_b >= 0.80 else "NEUTRAL"
+        return {"percent_b": float(percent_b), "signal": signal}
+
     def calculate_stats(self, combined_df):
         # Ensure moving forward in time (-400 to 0)
         df = combined_df.copy().sort_index()

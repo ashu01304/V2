@@ -16,20 +16,22 @@ RANK_YEARS = 4
 ZSCORE_WINDOW = 42
 SLOPE_DAYS = 10
 SLOPE_DROP_FRACTION = 0.20
+AMAN_LOOKBACK = 45
 
 def expression_metrics(sznlty, features, symbol, expression, rank_years,
-                       zscore_window, slope_days, slope_drop_fraction):
+                       zscore_window, slope_days, slope_drop_fraction,
+                       aman_lookback=AMAN_LOOKBACK):
     legs = parse_expression(expression)
     codes = sorted({code for _, code in legs})
     histories = sznlty.db.get_contract_history(symbol, codes)
     if not legs or any(code not in histories or histories[code].empty for code in codes):
-        return None, None, None, None, None
+        return None, None, None, None, None, None
     common = None
     for code in codes:
         dates = pd.DatetimeIndex(histories[code].index).normalize()
         common = dates if common is None else common.intersection(dates)
     if common is None or common.empty:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
     anchor = legs[0][1]
     expiry = sznlty._official_or_last_date(symbol, anchor, histories[anchor])
     required = max(0, int(np.busday_count(
@@ -44,12 +46,12 @@ def expression_metrics(sznlty, features, symbol, expression, rank_years,
     combined = result.get("combined", pd.DataFrame())
     current = next((column for column in combined if int(column) == current_year), None)
     if current is None or combined[current].dropna().empty:
-        return None, None, None, None, None
+        return None, None, None, None, None, None
     live = combined[current].dropna()
     day = live.index.max()
     rank_data = features.calculate_current_rank_ratio(combined, rank_years)
     if day not in rank_data.index or pd.isna(rank_data.at[day, "Rank"]):
-        return None, None, None, None, None
+        return None, None, None, None, None, None
     rank = f"{int(rank_data.at[day, 'Rank'])}/{int(rank_data.at[day, 'Count'])}"
     zscore = features.create_live_features(
         live, {"TECH_ZScore": {"window": zscore_window}}
@@ -57,14 +59,15 @@ def expression_metrics(sznlty, features, symbol, expression, rank_years,
     slope = features.calculate_average_forward_slope(
         combined, slope_days, rank_years - 1, slope_drop_fraction
     ).get(day)
+    aman = features.calculate_bollinger_signal(live, aman_lookback)["signal"]
     return (float(live.iloc[-1]), rank,
             None if pd.isna(zscore) else float(zscore),
-            None if pd.isna(slope) else float(slope), result)
+            None if pd.isna(slope) else float(slope), aman, result)
 
 def calculate_dashboard(universe, symbol, rank_years, zscore_window,
                         slope_days, slope_drop_fraction):
     columns = universe["columns"]
-    records = {name: [] for name in ("values", "ranks", "zscores", "slopes")}
+    records = {name: [] for name in ("values", "ranks", "zscores", "slopes", "aman")}
     results, db = {}, DatabaseManager()
     sznlty, features = Seasonality(db), FeatureCreator()
     try:
@@ -76,10 +79,10 @@ def calculate_dashboard(universe, symbol, rank_years, zscore_window,
                     sznlty, features, symbol, expression, rank_years,
                     zscore_window, slope_days, slope_drop_fraction,
                 )
-                for name, value in zip(records, metrics[:4]):
+                for name, value in zip(records, metrics[:5]):
                     rows[name][strategy] = value
-                if metrics[4] is not None:
-                    results[expression] = metrics[4]
+                if metrics[5] is not None:
+                    results[expression] = metrics[5]
             for name in records:
                 records[name].append(rows[name])
     finally:
@@ -119,15 +122,24 @@ def rank_color(rank):
     rgb = tuple(round(a + (b - a) * ratio) for a, b in zip(start, end))
     return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
 
-def format_cell(value, rank, zscore, slope):
-    z_square = f"<span style='color:{zscore_color(zscore)};font-size:22px'>■</span>"
-    if format_value(value) == "-" or rank is None or pd.isna(rank):
-        rank_square = f"<span style='color:{rank_color(None)};font-size:22px'>■</span>"
-        return f"-<br>{rank_square} -<br>{z_square} Z -<br>S -"
-    rank_square = f"<span style='color:{rank_color(rank)};font-size:22px'>■</span>"
-    zscore_text = "-" if pd.isna(zscore) else f"{zscore:.2f}"
-    slope_text = "-" if slope is None or pd.isna(slope) else format_value(slope)
-    return f"<b>{format_value(value)}</b><br>{rank_square} <b>{rank}</b><br>{z_square} <span style='font-size:14px'>Z {zscore_text}</span><br>S {slope_text}"
+def format_cell(value, rank, zscore, slope, aman):
+    valid = format_value(value) != "-" and rank is not None and not pd.isna(rank)
+    value_text = format_value(value) if valid else "-"
+    rank_text = rank if valid else "-"
+    zscore_text = f"{zscore:.3f}" if valid and pd.notna(zscore) else "-"
+    slope_text = format_value(slope) if valid and pd.notna(slope) else "-"
+    aman_signal = aman if isinstance(aman, str) else None
+    aman_text = {"LONG": "B", "SHORT": "S", "NEUTRAL": "N"}.get(aman_signal, "-")
+    aman_class = aman_signal.lower() if aman_signal else "missing"
+    return (
+        "<div class='metric-cell'><div class='metric-left'>"
+        f"<div class='metric-value'>{value_text}</div><div>S = {slope_text}</div>"
+        f"<div class='aman-{aman_class}'>Aman = {aman_text}</div>"
+        "</div><div class='metric-right'>"
+        f"<div><span class='metric-square' style='background:{zscore_color(zscore)}'></span>{zscore_text}</div>"
+        f"<div><span class='metric-square' style='background:{rank_color(rank if valid else None)}'></span>{rank_text}</div>"
+        "</div></div>"
+    )
 
 # Load the organized expression matrix.
 with open(CONTRACTS_FILE, encoding="utf-8") as file:
@@ -137,13 +149,13 @@ columns = universe["columns"]
 
 def make_display(frames):
     values, ranks = frames["values"], frames["ranks"]
-    zscores, slopes = frames["zscores"], frames["slopes"]
+    zscores, slopes, aman = frames["zscores"], frames["slopes"], frames["aman"]
     display = values.copy()
     for column in columns:
         display[column] = [
-            format_cell(value, rank, zscore, slope)
-            for value, rank, zscore, slope in zip(
-                values[column], ranks[column], zscores[column], slopes[column]
+            format_cell(value, rank, zscore, slope, signal)
+            for value, rank, zscore, slope, signal in zip(
+                values[column], ranks[column], zscores[column], slopes[column], aman[column]
             )
         ]
     return display
@@ -160,7 +172,8 @@ frames, seasonality_results = calculate_dashboard(
 )
 display_df = make_display(frames)
 dashboard_state = {"display": display_df, "slopes": frames["slopes"],
-                   "zscores": frames["zscores"], "results": seasonality_results,
+                   "zscores": frames["zscores"], "aman": frames["aman"],
+                   "results": seasonality_results,
                    "symbol": SYMBOL, "version": 0}
 
 def control(label, component):
@@ -200,6 +213,18 @@ app.layout = html.Div([
             labelStyle={"marginRight": "10px"},
         ),
     ], className="columns-panel"),
+    html.Div([
+        html.Span("Highlights:"),
+        dcc.Checklist(
+            id="highlight-selector",
+            options=[{"label": "Slope", "value": "slope"},
+                     {"label": "Z-score", "value": "zscore"},
+                     {"label": "Aman B/S", "value": "aman"}],
+            value=["slope", "zscore", "aman"],
+            inline=True,
+            inputStyle={"marginLeft": "8px", "marginRight": "3px"},
+        ),
+    ], className="highlight-options"),
     dash_table.DataTable(
         id="contracts-table",
         data=display_df.to_dict("records"),
@@ -211,10 +236,10 @@ app.layout = html.Div([
                       "fontWeight": "bold", "textAlign": "center"},
         style_cell={"backgroundColor": "#111827", "color": "#f8fafc",
                     "border": "1px solid #354258", "textAlign": "center",
-                    "minWidth": "64px", "width": "64px", "maxWidth": "64px",
-                    "height": "84px", "fontSize": "13px", "padding": "2px"},
+                    "minWidth": "98px", "width": "98px", "maxWidth": "98px",
+                    "height": "90px", "fontSize": "10px", "padding": "2px"},
         style_cell_conditional=[{"if": {"column_id": "Contract"},
-                                 "minWidth": "58px", "width": "58px", "maxWidth": "58px"}],
+                                 "minWidth": "48px", "width": "48px", "maxWidth": "48px"}],
         style_data_conditional=[{"if": {"row_index": "odd"},
                                  "backgroundColor": "#151f30"}],
         css=[{"selector": "p", "rule": "margin:0"}],
@@ -256,7 +281,8 @@ def apply_parameters(_, symbol, rank_years, zscore_window, slope_days):
     )
     display = make_display(frames)
     dashboard_state.update({"display": display, "slopes": frames["slopes"],
-                            "zscores": frames["zscores"], "results": results,
+                            "zscores": frames["zscores"], "aman": frames["aman"],
+                            "results": results,
                             "symbol": symbol,
                             "version": dashboard_state["version"] + 1})
     return display.to_dict("records"), f"{symbol} — Latest Contract Values", dashboard_state["version"]
@@ -275,28 +301,39 @@ def select_columns(selected):
     Output("contracts-table", "style_data_conditional"),
     Input("slope-threshold", "value"),
     Input("zscore-threshold", "value"),
+    Input("highlight-selector", "value"),
     Input("data-version", "data"),
 )
-def highlight_cells(slope_threshold, zscore_threshold, _):
-    styles = [{"if": {"row_index": "odd"}, "backgroundColor": "#151f30"}]
+def highlight_cells(slope_threshold, zscore_threshold, selected, _):
+    styles = [
+        {"if": {"row_index": "even"}, "background": "#111827"},
+        {"if": {"row_index": "odd"}, "background": "#151f30"},
+    ]
     slopes = dashboard_state["slopes"]
     zscores = dashboard_state["zscores"]
+    aman = dashboard_state["aman"]
+    selected = set(selected or [])
     for row in range(len(slopes)):
         for column in columns:
-            if slope_threshold is not None:
-                slope = slopes.at[row, column]
-                if pd.notna(slope) and abs(slope) > abs(float(slope_threshold)):
-                    styles.append({
-                        "if": {"row_index": row, "column_id": column},
-                        "backgroundColor": "#4a3412",
-                    })
-            if zscore_threshold is not None:
-                zscore = zscores.at[row, column]
-                if pd.notna(zscore) and abs(zscore) > abs(float(zscore_threshold)):
-                    styles.append({
-                        "if": {"row_index": row, "column_id": column},
-                        "border": "3px solid #22d3ee",
-                    })
+            colors = []
+            slope, zscore, signal = (slopes.at[row, column], zscores.at[row, column],
+                                     aman.at[row, column])
+            if ("slope" in selected and slope_threshold is not None
+                    and pd.notna(slope) and abs(slope) > abs(float(slope_threshold))):
+                colors.append("#6b4f1d")
+            if ("zscore" in selected and zscore_threshold is not None
+                    and pd.notna(zscore) and abs(zscore) > abs(float(zscore_threshold))):
+                colors.append("#164e63")
+            if "aman" in selected and signal in {"LONG", "SHORT"}:
+                colors.append("#14532d" if signal == "LONG" else "#7f1d1d")
+            if colors:
+                stops = 100 / len(colors)
+                gradient = ", ".join(
+                    f"{color} {index * stops:.0f}% {(index + 1) * stops:.0f}%"
+                    for index, color in enumerate(colors)
+                )
+                styles.append({"if": {"row_index": row, "column_id": column},
+                               "background": f"linear-gradient(135deg, {gradient})"})
     return styles
 
 @app.callback(
