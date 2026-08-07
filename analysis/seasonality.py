@@ -37,7 +37,7 @@ class Seasonality:
                 warnings.append(f"{s}: missing data for anchor {anchor_code}")
                 continue
 
-            expiry = self._official_or_last_date(symbol, anchor_code, anchor_hist)
+            expiry = self.official_or_last_date(symbol, anchor_code, anchor_hist)
             leg_data, valid = {}, True
 
             for _, contract in legs:
@@ -84,7 +84,7 @@ class Seasonality:
 
         return self._package_working_days(series_out, warnings, window_days)
 
-    def _official_or_last_date(self, symbol, contract_code, history):
+    def official_or_last_date(self, symbol, contract_code, history):
         official = self.official_expiry.get(symbol, contract_code)
         return pd.Timestamp(official if official is not None else history.index.max()).normalize()
 
@@ -100,15 +100,10 @@ class Seasonality:
         ).sort_index()
         combined = raw_combined.interpolate(method="linear", limit_area="inside")
 
-        tickvals = [-window_days, -300, -200, -100, 0]
-        tickvals = [t for t in tickvals if -window_days <= t <= 0]
-        ticktext = ["Expiry" if tick == 0 else str(tick) for tick in tickvals]
-
         return {
             "series": series_out,
             "raw_combined": raw_combined,
             "combined": combined,
-            "ticks": (tickvals, ticktext),
             "warnings": warnings,
             "xaxis_title": "Working days to expiry",
         }

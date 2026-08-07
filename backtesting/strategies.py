@@ -17,14 +17,14 @@
 # MaxDrawdown_15Y_[Interval]D: Average of the worst price drops seen within [Interval] days across all years.
 
 # 4. Clean Seasonal Paths (Filtered Averages)
-# Avg_5y_Clean: The mean price of the last 5 years after removing the most anomalous year (by volatility).
-# Avg_10y_Clean: The mean price of the last 10 years after removing the 2 most anomalous years.
-# Avg_15y_Clean: The mean price of all available years after removing the 3 most anomalous years.
+# Avg_5Y_Clean: The mean price of the last 5 years after removing the most anomalous year (by volatility).
+# Avg_10Y_Clean: The mean price of the last 10 years after removing the 2 most anomalous years.
+# Avg_15Y_Clean: The mean price of all available years after removing the 3 most anomalous years.
 
 # 5. Global Seasonal Benchmarks
 # STAT_Average: The global average price for this "Day to Expiry" across all historical years.
 # STAT_Std_Dev: The standard deviation (spread) of prices across all historical years for this day.
-# STAT_Rolling_2Sigma_Path: The 2nd standard deviation of the average path's 30-day volatility.
+# STAT_Rolling_2S: The 2nd standard deviation of the average path's 30-day volatility.
 # Current_Rank: The historical rank of the price at this "Day to Expiry" (1 = highest price in history).
 
 # 6. Live Test-Year Data (live_data Series)

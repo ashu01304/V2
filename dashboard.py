@@ -10,7 +10,6 @@ from analysis.feature_creation import FeatureCreator
 from analysis.plotting import SeasonalityPlotter
 from analysis.seasonality import Seasonality
 
-SYMBOL = "NG"
 CONTRACTS_FILE = "contracts_list.json"
 RANK_YEARS = 4
 ZSCORE_WINDOW = 42
@@ -33,7 +32,7 @@ def expression_metrics(sznlty, features, symbol, expression, rank_years,
     if common is None or common.empty:
         return None, None, None, None, None, None
     anchor = legs[0][1]
-    expiry = sznlty._official_or_last_date(symbol, anchor, histories[anchor])
+    expiry = sznlty.official_or_last_date(symbol, anchor, histories[anchor])
     required = max(0, int(np.busday_count(
         common.max().to_datetime64().astype("datetime64[D]"),
         expiry.to_datetime64().astype("datetime64[D]"),
@@ -97,6 +96,10 @@ def format_value(value):
     # Display up to four decimals without unnecessary trailing zeroes.
     return f"{value:.4f}".rstrip("0").rstrip(".")
 
+def interpolate_color(start, end, ratio):
+    rgb = tuple(round(a + (b - a) * ratio) for a, b in zip(start, end))
+    return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+
 def zscore_color(zscore):
     if zscore is None or pd.isna(zscore):
         return "#64748b"
@@ -106,8 +109,7 @@ def zscore_color(zscore):
         if zscore < 0 else
         ((250, 204, 21), (22, 163, 74), zscore / 2)
     )
-    rgb = tuple(round(a + (b - a) * ratio) for a, b in zip(start, end))
-    return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+    return interpolate_color(start, end, ratio)
 
 def rank_color(rank):
     if rank is None or pd.isna(rank):
@@ -119,8 +121,7 @@ def rank_color(rank):
         if ratio < 0.5 else
         ((250, 204, 21), (220, 38, 38), (ratio - 0.5) * 2)
     )
-    rgb = tuple(round(a + (b - a) * ratio) for a, b in zip(start, end))
-    return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+    return interpolate_color(start, end, ratio)
 
 def format_cell(value, rank, zscore, slope, aman):
     valid = format_value(value) != "-" and rank is not None and not pd.isna(rank)
@@ -167,14 +168,15 @@ try:
 finally:
     product_db.close()
 
-frames, seasonality_results = calculate_dashboard(
-    universe, SYMBOL, RANK_YEARS, ZSCORE_WINDOW, SLOPE_DAYS, SLOPE_DROP_FRACTION
-)
+empty = pd.DataFrame({"Contract": list(universe["contracts"])})
+frames = {name: empty.reindex(columns=["Contract", *columns])
+          for name in ("values", "ranks", "zscores", "slopes", "aman")}
+seasonality_results = {}
 display_df = make_display(frames)
 dashboard_state = {"display": display_df, "slopes": frames["slopes"],
                    "zscores": frames["zscores"], "aman": frames["aman"],
                    "results": seasonality_results,
-                   "symbol": SYMBOL, "version": 0}
+                   "symbol": None, "version": 0}
 
 def control(label, component):
     return html.Label([html.Span(label), component], className="control-group")
@@ -187,13 +189,13 @@ def number_control(label, component_id, value, minimum, step):
 app = Dash(__name__)
 plotter = SeasonalityPlotter()
 app.layout = html.Div([
-    html.H3(f"{SYMBOL} — Latest Contract Values", id="page-title"),
+    html.H3("Select a product", id="page-title"),
     html.Div([
         control("Product", dcc.Dropdown(
             id="product-selector",
             options=[{"label": product, "value": product} for product in products],
-            value=SYMBOL if SYMBOL in products else products[0],
-            clearable=False, className="product-dropdown")),
+            value=None, placeholder="Select product",
+            clearable=True, className="product-dropdown")),
         number_control("Rank years", "rank-years", RANK_YEARS, 2, 1),
         number_control("Z-score window", "zscore-window", ZSCORE_WINDOW, 2, 1),
         number_control("Slope days", "slope-days", SLOPE_DAYS, 1, 1),
@@ -268,13 +270,15 @@ app.layout = html.Div([
     Output("page-title", "children"),
     Output("data-version", "data"),
     Input("apply-parameters", "n_clicks"),
-    State("product-selector", "value"),
+    Input("product-selector", "value"),
     State("rank-years", "value"),
     State("zscore-window", "value"),
     State("slope-days", "value"),
     prevent_initial_call=True,
 )
 def apply_parameters(_, symbol, rank_years, zscore_window, slope_days):
+    if not symbol:
+        return display_df.to_dict("records"), "Select a product", dashboard_state["version"]
     frames, results = calculate_dashboard(
         universe, symbol, int(rank_years), int(zscore_window), int(slope_days),
         SLOPE_DROP_FRACTION,

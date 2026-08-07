@@ -79,7 +79,7 @@ def run_backtest(symbol, data_start_year, test_start_year, data_end_year, window
 def _summary(trades, group):
     if trades.empty or group not in trades:
         return pd.DataFrame()
-    hold = "Days_Held" if "Days_Held" in trades else "Duration"
+    hold = "Days_Held"
     summary = trades.groupby(group, as_index=False).agg(
         Trades=("Price_Move", "size"), Winners=("Success", "sum"),
         Success_Rate=("Success", "mean"), Total_Move=("Price_Move", "sum"),

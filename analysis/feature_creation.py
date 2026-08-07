@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+from analysis.utils import BRACKETS, year_columns
 
 class FeatureCreator:
     def create_historical_features(self, combined_df, features):
@@ -7,7 +8,7 @@ class FeatureCreator:
         names = set(features)
         output = pd.DataFrame(index=combined_df.index)
 
-        clean_names = names & {"Avg_5y_Clean", "Avg_10y_Clean", "Avg_15y_Clean"}
+        clean_names = names & {"Avg_5Y_Clean", "Avg_10Y_Clean", "Avg_15Y_Clean"}
         if clean_names:
             cleaned = self.get_cleaned_averages(combined_df, self.get_anomaly_years(combined_df))
             output[list(clean_names)] = cleaned[list(clean_names)]
@@ -61,12 +62,12 @@ class FeatureCreator:
 
     def get_anomaly_years(self, combined_df):
         """
-        Identifies anomaly years based on correlation across three brackets:
+        Identifies anomaly years based on rolling volatility across three brackets:
         - 11-15 years (Full) -> 3 anomalies (Requires min 11 years)
         - 6-10 years (Medium) -> 2 anomalies (Requires min 6 years)
         - 4-5 years (Short) -> 1 anomaly (Requires min 4 years)
         """
-        all_years = sorted(combined_df.columns)
+        all_years = year_columns(combined_df)
         if not all_years:
             return None
 
@@ -74,9 +75,11 @@ class FeatureCreator:
         historical_pool = all_years[:-1]
         
         results = {
-            "bracket_15y": self._calculate_subset(combined_df, historical_pool, 15, min_req=11, budget=3),
-            "bracket_10y": self._calculate_subset(combined_df, historical_pool, 10, min_req=6, budget=2),
-            "bracket_5y":  self._calculate_subset(combined_df, historical_pool, 5, min_req=4, budget=1)
+            f"bracket_{name.lower()}": self._calculate_subset(
+                combined_df, historical_pool, config["window"],
+                config["anomaly_min"], config["anomaly_budget"]
+            )
+            for name, config in BRACKETS.items()
         }
         
         return results
@@ -107,23 +110,21 @@ class FeatureCreator:
     def get_cleaned_averages(self, combined_df, anomaly_map):
         """
         Creates a copy of the seasonality data and adds cleaned average columns:
-        - Avg_5y_Clean: Last 5 historical years minus 1 anomaly
-        - Avg_10y_Clean: Last 10 historical years minus 2 anomalies
-        - Avg_15y_Clean: Last 15 historical years minus 3 anomalies
+        - Avg_5Y_Clean: Last 5 historical years minus 1 anomaly
+        - Avg_10Y_Clean: Last 10 historical years minus 2 anomalies
+        - Avg_15Y_Clean: Last 15 historical years minus 3 anomalies
         """
         # 1. Create a copy of the price matrix
         df_cleaned = combined_df.copy()
-        all_years = sorted(df_cleaned.columns)
+        all_years = year_columns(df_cleaned)
         
         # Exclude current year from all historical average calculations
         historical_pool = all_years[:-1]
 
         # 2. Define calculations for each bracket
         brackets = [
-            # (Column Name, Window Size, Anomaly Key)
-            ('Avg_5y_Clean', 5, 'bracket_5y'),
-            ('Avg_10y_Clean', 10, 'bracket_10y'),
-            ('Avg_15y_Clean', 15, 'bracket_15y')
+            (f"Avg_{name}_Clean", config["window"], f"bracket_{name.lower()}")
+            for name, config in BRACKETS.items()
         ]
 
         for col_name, window, key in brackets:
@@ -147,13 +148,13 @@ class FeatureCreator:
         return df_cleaned
 
     def calculate_current_rank(self, combined_df):
-        year_cols = sorted([c for c in combined_df.columns if isinstance(c, (int, float)) and str(c).isdigit() or isinstance(c, int)])
+        year_cols = year_columns(combined_df)
         current_year = year_cols[-1]
         all_ranks = combined_df[year_cols].rank(axis=1, ascending=False, method='min')
         return all_ranks[current_year]
 
     def calculate_current_rank_ratio(self, combined_df, years=None):
-        year_cols = sorted(c for c in combined_df.columns if isinstance(c, (int, np.integer)))
+        year_cols = year_columns(combined_df)
         if years is not None:
             year_cols = year_cols[-years:]
         current_year = year_cols[-1]
@@ -166,11 +167,11 @@ class FeatureCreator:
     def calculate_average_forward_slope(self, combined_df, days=10, years=None,
                                         drop_least_correlated=0.2):
         df = combined_df.sort_index()
-        year_cols = sorted(c for c in df.columns if isinstance(c, (int, np.integer)))
+        year_cols = year_columns(df)
         current = year_cols[-1]
         historical = year_cols[:-1]
         if years is not None:
-            historical = historical[-years:]
+            historical = historical[-years:] if years > 0 else []
         if not historical:
             return pd.Series(np.nan, index=df.index)
         drop_count = int(len(historical) * drop_least_correlated)
@@ -195,15 +196,15 @@ class FeatureCreator:
     def calculate_stats(self, combined_df):
         # Ensure moving forward in time (-400 to 0)
         df = combined_df.copy().sort_index()
-        year_cols = sorted([
-            c for c in df.columns
-            if isinstance(c, (int, np.integer))
-        ])
+        year_cols = year_columns(df)
         year_df = df[year_cols]
         hist_years = year_cols[:-1]
         
         intervals = [3, 6, 10, 15, 21]
-        brackets = [('5Y', 5, 0), ('10Y', 10, 6), ('15Y', 15, 11)]
+        brackets = [
+            (name, config['window'], config['stats_min'])
+            for name, config in BRACKETS.items()
+        ]
         stat_results = pd.DataFrame(index=df.index)
         # Calculate Average, SD and Rolling 2S
         # Historical benchmarks must exclude the current/test year.

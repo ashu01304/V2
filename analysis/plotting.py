@@ -42,7 +42,6 @@ class SeasonalityPlotter:
             return None
 
         fig = go.Figure()
-        tickvals, ticktext = result.get('ticks', ([], []))
         def add_band(x, upper, lower, name, color):
             mask = upper.notna() & lower.notna()
             if not mask.any():
@@ -97,7 +96,8 @@ class SeasonalityPlotter:
         fig.update_layout(
             template="plotly_dark", paper_bgcolor='black', plot_bgcolor='black',
             title=title,
-            xaxis=dict(title=result.get("xaxis_title", "Month before expiry"), tickvals=tickvals, ticktext=ticktext, gridcolor='#333'),
+            xaxis=dict(title=result.get("xaxis_title", "Month before expiry"),
+                       tickmode="auto", nticks=6, gridcolor='#333'),
             yaxis=dict(title="Value", gridcolor='#333'),
             hovermode="x unified",
             height=900, width=1600,

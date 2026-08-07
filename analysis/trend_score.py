@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import math
 from analysis.expression import parse_expression, shift_contract_year
+from analysis.utils import year_columns
 
 
 def _validate_expression_history(sznlty, symbol, expression, start_year, end_year):
@@ -61,7 +62,7 @@ def get_stability_metrics(sznlty, symbol, expression, start_year, end_year, wind
     )
 
     df_data = result['combined']
-    year_cols = [c for c in df_data.columns if str(c).isdigit() and len(str(c)) == 4]
+    year_cols = year_columns(df_data)
     df_clean = df_data[year_cols][df_data.index <= -cutoff].sort_index()
 
     if df_clean.empty or not year_cols:
