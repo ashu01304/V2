@@ -100,6 +100,6 @@ class SeasonalityPlotter:
                        tickmode="auto", nticks=6, gridcolor='#333'),
             yaxis=dict(title="Value", gridcolor='#333'),
             hovermode="x unified",
-            height=900, width=1600,
+            height=800,
         )
         return fig

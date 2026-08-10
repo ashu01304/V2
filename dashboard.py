@@ -161,6 +161,50 @@ def make_display(frames):
         ]
     return display
 
+def correlation_value(left, right, lookback):
+    left = left.dropna().sort_index().tail(lookback).reset_index(drop=True)
+    right = right.dropna().sort_index().tail(lookback).reset_index(drop=True)
+    value = left.corr(right) if len(left) == len(right) == lookback else np.nan
+    return round(value * 100) if pd.notna(value) else None
+
+def correlation_color(value, threshold):
+    strength = 1 if threshold >= 100 else (abs(value) - threshold) / (100 - threshold)
+    strength = max(0, min(1, strength))
+    base = (17, 24, 39)
+    target = (22, 163, 74) if value >= 0 else (220, 38, 38)
+    ratio = 0.25 + 0.75 * strength
+    red, green, blue = (
+        round(start + (end - start) * ratio)
+        for start, end in zip(base, target)
+    )
+    return f"rgb({red}, {green}, {blue})"
+
+def correlation_matrix(expression, lookback):
+    selected = dashboard_state["results"].get(expression, {}).get("series", {})
+    if not selected:
+        return []
+    target = selected[max(selected)]["value"]
+    rows, db = [], DatabaseManager()
+    try:
+        histories = db.get_contract_history(
+            dashboard_state["symbol"], list(universe["contracts"])
+        )
+        for contract, strategies in universe["contracts"].items():
+            outright = histories.get(contract)
+            row = {"Corr": contract, "OUT": correlation_value(target, outright["Close"], lookback)
+                   if outright is not None and not outright.empty else None}
+            for strategy in columns:
+                candidate = dashboard_state["results"].get(
+                    strategies[strategy], {}
+                ).get("series", {})
+                row[strategy] = correlation_value(
+                    target, candidate[max(candidate)]["value"], lookback
+                ) if candidate else None
+            rows.append(row)
+    finally:
+        db.close()
+    return rows
+
 product_db = DatabaseManager()
 try:
     product_db.cursor.execute("SELECT DISTINCT symbol FROM seac_settlements ORDER BY symbol")
@@ -257,11 +301,33 @@ app.layout = html.Div([
                 "backgroundColor": "#dc2626", "border": "none",
                 "borderRadius": "6px", "cursor": "pointer",
             }),
-            dcc.Graph(id="seasonality-chart"),
+            html.Div(dcc.Graph(id="seasonality-chart", style={"height": "82vh"}),
+                     className="chart-half"),
+            html.Div([
+                html.Div([
+                    number_control("Correlation days", "correlation-days", 60, 2, 1),
+                    number_control("Highlight |corr| %", "correlation-threshold", 75, 0, 1),
+                ], className="control-row"),
+                dash_table.DataTable(
+                    id="correlation-table",
+                    columns=[{"name": column, "id": column} for column in ["Corr", "OUT", *columns]],
+                    data=[],
+                    style_table={"overflow": "auto", "height": "76vh"},
+                    style_header={"backgroundColor": "#17243a", "color": "white",
+                                  "fontWeight": "bold", "textAlign": "center"},
+                    style_cell={"backgroundColor": "#111827", "color": "white",
+                                "border": "1px solid #354258", "textAlign": "center",
+                                "minWidth": "42px", "width": "42px", "maxWidth": "42px",
+                                "fontSize": "11px", "padding": "3px"},
+                    fixed_rows={"headers": True},
+                ),
+            ], className="correlation-half"),
         ], style={"position": "relative", "zIndex": "1001",
-                  "backgroundColor": "black", "width": "90%", "padding": "10px"}),
+                  "display": "flex", "backgroundColor": "black",
+                  "width": "96%", "height": "88vh", "padding": "10px"}),
     ], id="chart-modal", style={"display": "none"}),
     dcc.Store(id="data-version", data=0),
+    dcc.Store(id="selected-expression"),
 ], style={"backgroundColor": "#0b1220", "color": "#f8fafc",
           "minHeight": "100vh", "padding": "8px"})
 
@@ -343,6 +409,7 @@ def highlight_cells(slope_threshold, zscore_threshold, selected, _):
 @app.callback(
     Output("seasonality-chart", "figure"),
     Output("chart-modal", "style"),
+    Output("selected-expression", "data"),
     Input("contracts-table", "active_cell"),
     Input("close-modal", "n_clicks"),
     Input("modal-backdrop", "n_clicks"),
@@ -351,14 +418,37 @@ def highlight_cells(slope_threshold, zscore_threshold, selected, _):
 def toggle_chart(cell, _, __):
     hidden = {"display": "none"}
     if ctx.triggered_id in {"close-modal", "modal-backdrop"} or not cell or cell["column_id"] == "Contract":
-        return go.Figure(), hidden
+        return go.Figure(), hidden, None
     display = dashboard_state["display"]
     contract = display.iloc[cell["row"]]["Contract"]
     expression = universe["contracts"][contract][cell["column_id"]]
     result = dashboard_state["results"].get(expression)
     if result is None:
-        return go.Figure(), hidden
+        return go.Figure(), hidden, None
     modal = {"display": "flex", "position": "fixed", "inset": "0", "zIndex": "1000",
              "backgroundColor": "rgba(0,0,0,0.75)", "alignItems": "center",
              "justifyContent": "center"}
-    return plotter.build_seasonality_figure(result, expression), modal
+    return plotter.build_seasonality_figure(result, expression), modal, expression
+
+@app.callback(
+    Output("correlation-table", "data"),
+    Output("correlation-table", "style_data_conditional"),
+    Input("selected-expression", "data"),
+    Input("correlation-days", "value"),
+    Input("correlation-threshold", "value"),
+)
+def update_correlations(expression, lookback, threshold):
+    if not expression:
+        return [], []
+    rows = correlation_matrix(expression, max(2, int(lookback or 60)))
+    limit = abs(float(threshold or 0))
+    styles = []
+    for row_index, row in enumerate(rows):
+        for column in ["OUT", *columns]:
+            value = row.get(column)
+            if value is not None and abs(value) >= limit:
+                styles.append({
+                    "if": {"row_index": row_index, "column_id": column},
+                    "backgroundColor": correlation_color(value, limit),
+                })
+    return rows, styles
