@@ -1,5 +1,78 @@
 import plotly.graph_objects as go
 
+
+class OHLCPlotter:
+    def plot(self, data, chart_type="candlestick", title=None, height=800,
+             x_axis="candle_number", show=True, bollinger_window=20,
+             bollinger_std=2, bollinger_method="simple", levels=None):
+        if not data:
+            print("No OHLC data available to plot.")
+            return
+
+        fig = go.Figure()
+        chart_type = chart_type.lower()
+        for instrument, df in data.items():
+            x = list(range(1 - len(df), 1)) if x_axis == "candle_number" else df.index
+            timestamps = df.index.strftime("%Y-%m-%d %H:%M:%S")
+            if chart_type == "candlestick":
+                fig.add_trace(go.Candlestick(
+                    x=x, open=df["Open"], high=df["High"],
+                    low=df["Low"], close=df["Close"], name=instrument,
+                    text=timestamps, hoverinfo="name+x+y+text",
+                ))
+            elif chart_type == "line":
+                fig.add_trace(go.Scatter(
+                    x=x, y=df["Close"], mode="lines", name=instrument,
+                    customdata=timestamps,
+                    hovertemplate=(f"{instrument}<br>Candle: %{{x}}<br>Time: %{{customdata}}"
+                                   "<br>Close: %{y:.4f}<extra></extra>"),
+                ))
+            else:
+                raise ValueError("chart_type must be 'candlestick' or 'line'")
+
+            close = df["Close"]
+            if bollinger_method == "ewm":
+                weighted = close.ewm(span=bollinger_window, adjust=False,
+                                     min_periods=bollinger_window)
+                middle, deviation = weighted.mean(), weighted.std() * bollinger_std
+            else:
+                middle = close.rolling(bollinger_window).mean()
+                deviation = close.rolling(bollinger_window).std() * bollinger_std
+            for values, label, dash in (
+                (middle + deviation, "Upper", "dot"),
+                (middle, "Average", "dash"),
+                (middle - deviation, "Lower", "dot"),
+            ):
+                fig.add_trace(go.Scatter(
+                    x=x, y=values, mode="lines", name=f"{instrument} BB {label}",
+                    line=dict(width=1, dash=dash), hoverinfo="skip",
+                ))
+
+            for label, price in (levels or {}).get(instrument, {}).items():
+                fig.add_trace(go.Scatter(
+                    x=x[-100:], y=[price] * min(100, len(x)), mode="lines",
+                    name=f"{instrument} {label}", hoverinfo="skip",
+                    line=dict(color="#00CC96" if label == "Support" else "#EF553B",
+                              width=2, dash="dash"),
+                ))
+
+        fig.update_layout(
+            template="plotly_dark", paper_bgcolor="black", plot_bgcolor="black",
+            title=title or "OHLC Price Chart",
+            xaxis=dict(title="Candle number from latest" if x_axis == "candle_number" else "Date",
+                       gridcolor="#333", rangeslider_visible=False, showspikes=True,
+                       spikemode="across", spikesnap="cursor",
+                       spikecolor="white", spikethickness=1),
+            yaxis=dict(title="Price", gridcolor="#333", showspikes=True,
+                       spikemode="across", spikesnap="cursor",
+                       spikecolor="white", spikethickness=1),
+            hovermode="closest",
+            height=height,
+        )
+        if show:
+            fig.show()
+        return fig
+
 class SeasonalityPlotter:
     def plot(self, data_dict, title="Seasonality"):
         fig = go.Figure()
