@@ -6,7 +6,7 @@ from dash import Dash, dcc, html
 
 
 # API parameters
-INSTRUMENTS = ["CLG26"]
+INSTRUMENTS = ["COZ27"]
 INTERVAL = "1H"              # 1M, 5M, 1H, or 1D
 COUNT = 401                  # Use None when supplying START and END
 START = None                 # Optional Unix timestamp in seconds

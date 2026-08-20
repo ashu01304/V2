@@ -1,4 +1,5 @@
 import json
+from threading import Lock, Thread
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -8,29 +9,29 @@ from database.manager import DatabaseManager
 from analysis.expression import parse_expression
 from analysis.feature_creation import FeatureCreator
 from analysis.plotting import SeasonalityPlotter
+from analysis.rollover import StrategyRollover
 from analysis.seasonality import Seasonality
 
 CONTRACTS_FILE = "contracts_list.json"
 RANK_YEARS = 4
 ZSCORE_WINDOW = 42
 SLOPE_DAYS = 10
-SLOPE_DROP_FRACTION = 0.20
 AMAN_LOOKBACK = 45
 
 def expression_metrics(sznlty, features, symbol, expression, rank_years,
-                       zscore_window, slope_days, slope_drop_fraction,
+                       zscore_window, slope_days,
                        aman_lookback=AMAN_LOOKBACK):
     legs = parse_expression(expression)
     codes = sorted({code for _, code in legs})
     histories = sznlty.db.get_contract_history(symbol, codes)
     if not legs or any(code not in histories or histories[code].empty for code in codes):
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
     common = None
     for code in codes:
         dates = pd.DatetimeIndex(histories[code].index).normalize()
         common = dates if common is None else common.intersection(dates)
     if common is None or common.empty:
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
     anchor = legs[0][1]
     expiry = sznlty.official_or_last_date(symbol, anchor, histories[anchor])
     required = max(0, int(np.busday_count(
@@ -45,56 +46,84 @@ def expression_metrics(sznlty, features, symbol, expression, rank_years,
     combined = result.get("combined", pd.DataFrame())
     current = next((column for column in combined if int(column) == current_year), None)
     if current is None or combined[current].dropna().empty:
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
     live = combined[current].dropna()
     day = live.index.max()
     rank_data = features.calculate_current_rank_ratio(combined, rank_years)
     if day not in rank_data.index or pd.isna(rank_data.at[day, "Rank"]):
-        return None, None, None, None, None, None
+        return None, None, None, None, None, None, None
     rank = f"{int(rank_data.at[day, 'Rank'])}/{int(rank_data.at[day, 'Count'])}"
     zscore = features.create_live_features(
         live, {"TECH_ZScore": {"window": zscore_window}}
     ).get("TECH_ZScore")
-    slope = features.calculate_average_forward_slope(
-        combined, slope_days, rank_years - 1, slope_drop_fraction
-    ).get(day)
+    slope_metrics = features.calculate_forward_slope_metrics(
+        combined, slope_days, rank_years - 1
+    ).loc[day]
     aman = features.calculate_bollinger_signal(live, aman_lookback)["signal"]
     return (float(live.iloc[-1]), rank,
             None if pd.isna(zscore) else float(zscore),
-            None if pd.isna(slope) else float(slope), aman, result)
+            None if pd.isna(slope_metrics["Median"]) else float(slope_metrics["Median"]),
+            None if pd.isna(slope_metrics["Direction"]) else float(slope_metrics["Direction"]),
+            aman, result)
 
-def calculate_dashboard(universe, symbol, rank_years, zscore_window,
-                        slope_days, slope_drop_fraction):
-    columns = universe["columns"]
-    records = {name: [] for name in ("values", "ranks", "zscores", "slopes", "aman")}
+def calculate_dashboard(universe, selected_columns, symbol, rank_years, zscore_window,
+                        slope_days, job_id):
+    names = ("values", "ranks", "zscores", "slopes", "directions", "aman")
     results, db = {}, DatabaseManager()
     sznlty, features = Seasonality(db), FeatureCreator()
+    empty_frame = pd.DataFrame(
+        None, index=range(len(universe["contracts"])),
+        columns=["Contract", *columns], dtype=object,
+    )
+    empty_frame["Contract"] = list(universe["contracts"])
+    frames = {name: empty_frame.copy() for name in names}
     try:
-        for contract, strategies in universe["contracts"].items():
-            rows = {name: {"Contract": contract} for name in records}
-            for strategy in columns:
-                expression = strategies[strategy]
-                metrics = expression_metrics(
-                    sznlty, features, symbol, expression, rank_years,
-                    zscore_window, slope_days, slope_drop_fraction,
-                )
-                for name, value in zip(records, metrics[:5]):
-                    rows[name][strategy] = value
-                if metrics[5] is not None:
-                    results[expression] = metrics[5]
-            for name in records:
-                records[name].append(rows[name])
+        batches = [selected_columns[i:i + 2] for i in range(0, len(selected_columns), 2)]
+        for batch_number, batch in enumerate(batches, 1):
+            for row, (_, strategies) in enumerate(universe["contracts"].items()):
+                for strategy in batch:
+                    with state_lock:
+                        if job_id != dashboard_state["job_id"]:
+                            return
+                    expression = strategies[strategy]
+                    metrics = expression_metrics(
+                        sznlty, features, symbol, expression, rank_years,
+                        zscore_window, slope_days,
+                    )
+                    for name, value in zip(names, metrics[:6]):
+                        frames[name].at[row, strategy] = value
+                    if metrics[6] is not None:
+                        results[expression] = metrics[6]
+            with state_lock:
+                if job_id != dashboard_state["job_id"]:
+                    return
+                snapshot = {name: frame.copy() for name, frame in frames.items()}
+                dashboard_state.update({
+                    "display": make_display(snapshot), "slopes": snapshot["slopes"],
+                    "zscores": snapshot["zscores"], "aman": snapshot["aman"],
+                    "results": results.copy(), "version": dashboard_state["version"] + 1,
+                    "title": f"{symbol} — batch {batch_number}/{len(batches)} complete",
+                })
+    except Exception:
+        with state_lock:
+            if job_id == dashboard_state["job_id"]:
+                dashboard_state.update({"processing": False,
+                                        "title": f"{symbol} — processing failed",
+                                        "version": dashboard_state["version"] + 1})
+        raise
     finally:
         db.close()
-    return ({name: pd.DataFrame(rows, columns=["Contract", *columns])
-             for name, rows in records.items()}, results)
+    with state_lock:
+        if job_id == dashboard_state["job_id"]:
+            dashboard_state.update({"processing": False,
+                                    "title": f"{symbol} — Latest Contract Values",
+                                    "version": dashboard_state["version"] + 1})
 
 def format_value(value):
     if value is None or pd.isna(value):
         return "-"
 
-    # Display up to four decimals without unnecessary trailing zeroes.
-    return f"{value:.4f}".rstrip("0").rstrip(".")
+    return np.format_float_positional(float(value), precision=10, trim="-")
 
 def interpolate_color(start, end, ratio):
     rgb = tuple(round(a + (b - a) * ratio) for a, b in zip(start, end))
@@ -123,18 +152,22 @@ def rank_color(rank):
     )
     return interpolate_color(start, end, ratio)
 
-def format_cell(value, rank, zscore, slope, aman):
+def format_cell(value, rank, zscore, slope, direction, aman):
+    if all(item is None or pd.isna(item) for item in (value, rank, zscore, slope, direction, aman)):
+        return ""
     valid = format_value(value) != "-" and rank is not None and not pd.isna(rank)
     value_text = format_value(value) if valid else "-"
     rank_text = rank if valid else "-"
     zscore_text = f"{zscore:.3f}" if valid and pd.notna(zscore) else "-"
     slope_text = format_value(slope) if valid and pd.notna(slope) else "-"
+    direction_text = f"{direction:+.0f}%" if valid and pd.notna(direction) else "-"
     aman_signal = aman if isinstance(aman, str) else None
     aman_text = {"LONG": "B", "SHORT": "S", "NEUTRAL": "N"}.get(aman_signal, "-")
     aman_class = aman_signal.lower() if aman_signal else "missing"
     return (
         "<div class='metric-cell'><div class='metric-left'>"
-        f"<div class='metric-value'>{value_text}</div><div>S = {slope_text}</div>"
+        f"<div class='metric-value'>{value_text}</div><div>M = {slope_text}</div>"
+        f"<div>D = {direction_text}</div>"
         f"<div class='aman-{aman_class}'>Aman = {aman_text}</div>"
         "</div><div class='metric-right'>"
         f"<div><span class='metric-square' style='background:{zscore_color(zscore)}'></span>{zscore_text}</div>"
@@ -150,60 +183,18 @@ columns = universe["columns"]
 
 def make_display(frames):
     values, ranks = frames["values"], frames["ranks"]
-    zscores, slopes, aman = frames["zscores"], frames["slopes"], frames["aman"]
+    zscores, slopes = frames["zscores"], frames["slopes"]
+    directions, aman = frames["directions"], frames["aman"]
     display = values.copy()
     for column in columns:
         display[column] = [
-            format_cell(value, rank, zscore, slope, signal)
-            for value, rank, zscore, slope, signal in zip(
-                values[column], ranks[column], zscores[column], slopes[column], aman[column]
+            format_cell(value, rank, zscore, slope, direction, signal)
+            for value, rank, zscore, slope, direction, signal in zip(
+                values[column], ranks[column], zscores[column], slopes[column],
+                directions[column], aman[column]
             )
         ]
     return display
-
-def correlation_value(left, right, lookback):
-    left = left.dropna().sort_index().tail(lookback).reset_index(drop=True)
-    right = right.dropna().sort_index().tail(lookback).reset_index(drop=True)
-    value = left.corr(right) if len(left) == len(right) == lookback else np.nan
-    return round(value * 100) if pd.notna(value) else None
-
-def correlation_color(value, threshold):
-    strength = 1 if threshold >= 100 else (abs(value) - threshold) / (100 - threshold)
-    strength = max(0, min(1, strength))
-    base = (17, 24, 39)
-    target = (22, 163, 74) if value >= 0 else (220, 38, 38)
-    ratio = 0.25 + 0.75 * strength
-    red, green, blue = (
-        round(start + (end - start) * ratio)
-        for start, end in zip(base, target)
-    )
-    return f"rgb({red}, {green}, {blue})"
-
-def correlation_matrix(expression, lookback):
-    selected = dashboard_state["results"].get(expression, {}).get("series", {})
-    if not selected:
-        return []
-    target = selected[max(selected)]["value"]
-    rows, db = [], DatabaseManager()
-    try:
-        histories = db.get_contract_history(
-            dashboard_state["symbol"], list(universe["contracts"])
-        )
-        for contract, strategies in universe["contracts"].items():
-            outright = histories.get(contract)
-            row = {"Corr": contract, "OUT": correlation_value(target, outright["Close"], lookback)
-                   if outright is not None and not outright.empty else None}
-            for strategy in columns:
-                candidate = dashboard_state["results"].get(
-                    strategies[strategy], {}
-                ).get("series", {})
-                row[strategy] = correlation_value(
-                    target, candidate[max(candidate)]["value"], lookback
-                ) if candidate else None
-            rows.append(row)
-    finally:
-        db.close()
-    return rows
 
 product_db = DatabaseManager()
 try:
@@ -214,13 +205,15 @@ finally:
 
 empty = pd.DataFrame({"Contract": list(universe["contracts"])})
 frames = {name: empty.reindex(columns=["Contract", *columns])
-          for name in ("values", "ranks", "zscores", "slopes", "aman")}
+          for name in ("values", "ranks", "zscores", "slopes", "directions", "aman")}
 seasonality_results = {}
 display_df = make_display(frames)
 dashboard_state = {"display": display_df, "slopes": frames["slopes"],
                    "zscores": frames["zscores"], "aman": frames["aman"],
                    "results": seasonality_results,
-                   "symbol": None, "version": 0}
+                   "symbol": None, "version": 0, "job_id": 0,
+                   "processing": False, "title": "Select a product"}
+state_lock = Lock()
 
 def control(label, component):
     return html.Label([html.Span(label), component], className="control-group")
@@ -243,7 +236,7 @@ app.layout = html.Div([
         number_control("Rank years", "rank-years", RANK_YEARS, 2, 1),
         number_control("Z-score window", "zscore-window", ZSCORE_WINDOW, 2, 1),
         number_control("Slope days", "slope-days", SLOPE_DAYS, 1, 1),
-        number_control("|Slope| >", "slope-threshold", 0.05, None, 0.01),
+        number_control("|Median slope| >", "slope-threshold", 0.05, None, 0.0001),
         number_control("|Z-score| >", "zscore-threshold", 1.5, None, 0.1),
         html.Button("Apply", id="apply-parameters", n_clicks=0,
                     className="apply-button"),
@@ -253,7 +246,7 @@ app.layout = html.Div([
         dcc.Checklist(
             id="column-selector",
             options=[{"label": column, "value": column} for column in columns],
-            value=columns,
+            value=[column for column in columns if not column.endswith("MS")],
             inline=True,
             inputStyle={"marginRight": "3px"},
             labelStyle={"marginRight": "10px"},
@@ -303,31 +296,15 @@ app.layout = html.Div([
             }),
             html.Div(dcc.Graph(id="seasonality-chart", style={"height": "82vh"}),
                      className="chart-half"),
-            html.Div([
-                html.Div([
-                    number_control("Correlation days", "correlation-days", 60, 2, 1),
-                    number_control("Highlight |corr| %", "correlation-threshold", 75, 0, 1),
-                ], className="control-row"),
-                dash_table.DataTable(
-                    id="correlation-table",
-                    columns=[{"name": column, "id": column} for column in ["Corr", "OUT", *columns]],
-                    data=[],
-                    style_table={"overflow": "auto", "height": "76vh"},
-                    style_header={"backgroundColor": "#17243a", "color": "white",
-                                  "fontWeight": "bold", "textAlign": "center"},
-                    style_cell={"backgroundColor": "#111827", "color": "white",
-                                "border": "1px solid #354258", "textAlign": "center",
-                                "minWidth": "42px", "width": "42px", "maxWidth": "42px",
-                                "fontSize": "11px", "padding": "3px"},
-                    fixed_rows={"headers": True},
-                ),
-            ], className="correlation-half"),
+            html.Div(dcc.Loading(dcc.Graph(id="rollover-chart", style={"height": "82vh"})),
+                     className="chart-half"),
         ], style={"position": "relative", "zIndex": "1001",
                   "display": "flex", "backgroundColor": "black",
                   "width": "96%", "height": "88vh", "padding": "10px"}),
     ], id="chart-modal", style={"display": "none"}),
     dcc.Store(id="data-version", data=0),
-    dcc.Store(id="selected-expression"),
+    dcc.Store(id="selected-cell"),
+    dcc.Interval(id="refresh-results", interval=500, n_intervals=0, disabled=True),
 ], style={"backgroundColor": "#0b1220", "color": "#f8fafc",
           "minHeight": "100vh", "padding": "8px"})
 
@@ -335,27 +312,45 @@ app.layout = html.Div([
     Output("contracts-table", "data"),
     Output("page-title", "children"),
     Output("data-version", "data"),
+    Output("refresh-results", "disabled"),
     Input("apply-parameters", "n_clicks"),
     Input("product-selector", "value"),
+    Input("refresh-results", "n_intervals"),
     State("rank-years", "value"),
     State("zscore-window", "value"),
     State("slope-days", "value"),
+    State("column-selector", "value"),
     prevent_initial_call=True,
 )
-def apply_parameters(_, symbol, rank_years, zscore_window, slope_days):
+def apply_parameters(_, symbol, __, rank_years, zscore_window, slope_days, selected):
+    if ctx.triggered_id == "refresh-results":
+        with state_lock:
+            return (dashboard_state["display"].to_dict("records"),
+                    dashboard_state["title"], dashboard_state["version"],
+                    not dashboard_state["processing"])
     if not symbol:
-        return display_df.to_dict("records"), "Select a product", dashboard_state["version"]
-    frames, results = calculate_dashboard(
-        universe, symbol, int(rank_years), int(zscore_window), int(slope_days),
-        SLOPE_DROP_FRACTION,
-    )
-    display = make_display(frames)
-    dashboard_state.update({"display": display, "slopes": frames["slopes"],
-                            "zscores": frames["zscores"], "aman": frames["aman"],
-                            "results": results,
-                            "symbol": symbol,
-                            "version": dashboard_state["version"] + 1})
-    return display.to_dict("records"), f"{symbol} — Latest Contract Values", dashboard_state["version"]
+        return (display_df.to_dict("records"), "Select a product",
+                dashboard_state["version"], True)
+    selected = [column for column in columns if column in (selected or [])]
+    blank = {name: frame.copy() for name, frame in frames.items()}
+    with state_lock:
+        job_id = dashboard_state["job_id"] + 1
+        dashboard_state.update({
+            "display": make_display(blank), "slopes": blank["slopes"],
+            "zscores": blank["zscores"], "aman": blank["aman"], "results": {},
+            "symbol": symbol, "version": dashboard_state["version"] + 1,
+            "job_id": job_id, "processing": bool(selected),
+            "title": f"{symbol} — processing 0/{len(selected)} categories",
+        })
+        current = (dashboard_state["display"].to_dict("records"),
+                   dashboard_state["title"], dashboard_state["version"],
+                   not dashboard_state["processing"])
+    if selected:
+        Thread(target=calculate_dashboard, args=(
+            universe, selected, symbol, int(rank_years), int(zscore_window),
+            int(slope_days), job_id,
+        ), daemon=True).start()
+    return current
 
 @app.callback(
     Output("contracts-table", "columns"),
@@ -379,9 +374,10 @@ def highlight_cells(slope_threshold, zscore_threshold, selected, _):
         {"if": {"row_index": "even"}, "background": "#111827"},
         {"if": {"row_index": "odd"}, "background": "#151f30"},
     ]
-    slopes = dashboard_state["slopes"]
-    zscores = dashboard_state["zscores"]
-    aman = dashboard_state["aman"]
+    with state_lock:
+        slopes = dashboard_state["slopes"].copy()
+        zscores = dashboard_state["zscores"].copy()
+        aman = dashboard_state["aman"].copy()
     selected = set(selected or [])
     for row in range(len(slopes)):
         for column in columns:
@@ -409,7 +405,7 @@ def highlight_cells(slope_threshold, zscore_threshold, selected, _):
 @app.callback(
     Output("seasonality-chart", "figure"),
     Output("chart-modal", "style"),
-    Output("selected-expression", "data"),
+    Output("selected-cell", "data"),
     Input("contracts-table", "active_cell"),
     Input("close-modal", "n_clicks"),
     Input("modal-backdrop", "n_clicks"),
@@ -419,36 +415,37 @@ def toggle_chart(cell, _, __):
     hidden = {"display": "none"}
     if ctx.triggered_id in {"close-modal", "modal-backdrop"} or not cell or cell["column_id"] == "Contract":
         return go.Figure(), hidden, None
-    display = dashboard_state["display"]
+    with state_lock:
+        display = dashboard_state["display"].copy()
+        results = dashboard_state["results"].copy()
+        symbol = dashboard_state["symbol"]
     contract = display.iloc[cell["row"]]["Contract"]
     expression = universe["contracts"][contract][cell["column_id"]]
-    result = dashboard_state["results"].get(expression)
+    result = results.get(expression)
     if result is None:
         return go.Figure(), hidden, None
     modal = {"display": "flex", "position": "fixed", "inset": "0", "zIndex": "1000",
              "backgroundColor": "rgba(0,0,0,0.75)", "alignItems": "center",
              "justifyContent": "center"}
-    return plotter.build_seasonality_figure(result, expression), modal, expression
+    return (plotter.build_seasonality_figure(result, expression), modal,
+            {"contract": contract, "strategy": cell["column_id"],
+             "expression": expression, "symbol": symbol,
+             "years": sorted(result.get("series", {}))})
 
 @app.callback(
-    Output("correlation-table", "data"),
-    Output("correlation-table", "style_data_conditional"),
-    Input("selected-expression", "data"),
-    Input("correlation-days", "value"),
-    Input("correlation-threshold", "value"),
+    Output("rollover-chart", "figure"),
+    Input("selected-cell", "data"),
 )
-def update_correlations(expression, lookback, threshold):
-    if not expression:
-        return [], []
-    rows = correlation_matrix(expression, max(2, int(lookback or 60)))
-    limit = abs(float(threshold or 0))
-    styles = []
-    for row_index, row in enumerate(rows):
-        for column in ["OUT", *columns]:
-            value = row.get(column)
-            if value is not None and abs(value) >= limit:
-                styles.append({
-                    "if": {"row_index": row_index, "column_id": column},
-                    "backgroundColor": correlation_color(value, limit),
-                })
-    return rows, styles
+def update_rollover(selection):
+    if not selection:
+        return go.Figure()
+    db = DatabaseManager()
+    try:
+        result = StrategyRollover(db).calculate(
+            selection["symbol"], selection["expression"]
+        )
+    finally:
+        db.close()
+    return plotter.build_rollover_figure(
+        result, f"{selection['strategy']} Strategy Rollover"
+    )

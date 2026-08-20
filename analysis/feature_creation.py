@@ -181,6 +181,21 @@ class FeatureCreator:
             historical = [year for year in historical if year not in excluded]
         return ((df[historical].shift(-days) - df[historical]) / days).mean(axis=1)
 
+    def calculate_forward_slope_metrics(self, combined_df, days=10, years=None):
+        df = combined_df.sort_index()
+        year_cols = year_columns(df)
+        historical = year_cols[:-1]
+        if years is not None:
+            historical = historical[-years:] if years > 0 else []
+        if not historical:
+            return pd.DataFrame({"Median": np.nan, "Direction": np.nan}, index=df.index)
+        slopes = (df[historical].shift(-days) - df[historical]) / days
+        valid = slopes.notna().sum(axis=1).replace(0, np.nan)
+        return pd.DataFrame({
+            "Median": slopes.median(axis=1),
+            "Direction": np.sign(slopes).sum(axis=1) / valid * 100,
+        }, index=df.index)
+
     def calculate_bollinger_signal(self, live_series, window=45):
         trailing = live_series.dropna().sort_index().tail(window)
         if len(trailing) < window:

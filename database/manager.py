@@ -8,6 +8,7 @@ class DatabaseManager:
     def __init__(self):
         self.conn = sqlite3.connect(DB_PATH)
         self.cursor = self.conn.cursor()
+        self._history_cache = {}
         self._initialize_tables()
 
     def _initialize_tables(self):
@@ -26,10 +27,17 @@ class DatabaseManager:
         query = "INSERT OR REPLACE INTO seac_settlements VALUES (?, ?, ?, ?)"
         self.cursor.executemany(query, rows)
         self.conn.commit()
+        self._history_cache.clear()
 
     def get_contract_history(self, symbol, codes):
         data = {}
         for code in codes:
+            key = (symbol, code)
+            if key in self._history_cache:
+                df = self._history_cache[key]
+                if not df.empty:
+                    data[code] = df
+                continue
             query = """
                 SELECT trading_date as Date, price as Close 
                 FROM seac_settlements 
@@ -40,6 +48,8 @@ class DatabaseManager:
             if not df.empty:
                 df['Date'] = pd.to_datetime(df['Date'])
                 df.set_index('Date', inplace=True)
+            self._history_cache[key] = df
+            if not df.empty:
                 data[code] = df
         return data
 

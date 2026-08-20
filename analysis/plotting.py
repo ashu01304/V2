@@ -25,7 +25,7 @@ class OHLCPlotter:
                     x=x, y=df["Close"], mode="lines", name=instrument,
                     customdata=timestamps,
                     hovertemplate=(f"{instrument}<br>Candle: %{{x}}<br>Time: %{{customdata}}"
-                                   "<br>Close: %{y:.4f}<extra></extra>"),
+                                   "<br>Close: %{y}<extra></extra>"),
                 ))
             else:
                 raise ValueError("chart_type must be 'candlestick' or 'line'")
@@ -83,7 +83,7 @@ class SeasonalityPlotter:
             fig.add_trace(go.Scatter(
                 x=df.index, y=df['Close'], name=str(label),
                 line=dict(width=4 if is_avg else 2, color='white' if is_avg else colors[i % len(colors)]),
-                hovertemplate=f"{label}<br>Date: %{{x|%b %d}}<br>Price: %{{y:.2f}}<extra></extra>"
+                hovertemplate=f"{label}<br>Date: %{{x|%b %d}}<br>Price: %{{y}}<extra></extra>"
             ))
 
         fig.update_layout(
@@ -152,9 +152,9 @@ class SeasonalityPlotter:
                 mode='lines',
                 line=dict(width=2 if is_current else 1, color='white' if is_current else colors[color_i % len(colors)]),
                 customdata=customdata,
-                hovertemplate=(f"{year}<br>Date: %{{customdata}}""<br>Value: %{y:.2f}<extra></extra>"
+                hovertemplate=(f"{year}<br>Date: %{{customdata}}""<br>Value: %{y}<extra></extra>"
                     if customdata is not None
-                    else f"{year}<br>Value: %{{y:.2f}}<extra></extra>")
+                    else f"{year}<br>Value: %{{y}}<extra></extra>")
             ))
             if not is_current: color_i += 1
 
@@ -163,7 +163,7 @@ class SeasonalityPlotter:
                 x=average.index, y=average.values, name='AVERAGE',
                 mode='lines',
                 line=dict(width=3, color='#00CC96'),
-                hovertemplate=("AVERAGE<br>Days to expiry: %{x}""<br>Value: %{y:.2f}<extra></extra>")
+                hovertemplate=("AVERAGE<br>Days to expiry: %{x}""<br>Value: %{y}<extra></extra>")
             ))
 
         fig.update_layout(
@@ -174,5 +174,44 @@ class SeasonalityPlotter:
             yaxis=dict(title="Value", gridcolor='#333'),
             hovermode="x unified",
             height=800,
+        )
+        return fig
+
+    def build_rollover_figure(self, result, title="Strategy Rollover"):
+        fig = go.Figure()
+        colors = ['#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A', '#19D3F3']
+        current_expiry_days = []
+        for index, (contract, item) in enumerate(result.get("series", {}).items()):
+            data = item["data"]
+            active = item["active"]
+            current_expiry_days.append(item["current_expiry_day"])
+            fig.add_trace(go.Scatter(
+                x=data.index, y=data["value"], mode="lines",
+                name=str(contract),
+                line=dict(width=3 if active else 1.5,
+                          color="white" if active else colors[index % len(colors)]),
+                customdata=list(zip(data["date"].dt.strftime("%Y-%m-%d"), data["side"])),
+                hovertemplate=("Year: %{fullData.name}<br>%{customdata[1]}"
+                               "<br>Date: %{customdata[0]}"
+                               "<br>Change: %{y}<extra></extra>"),
+            ))
+            if active:
+                latest = data.iloc[-1]
+                fig.add_trace(go.Scatter(
+                    x=[data.index[-1]], y=[latest["value"]], mode="markers",
+                    marker=dict(size=8, color="white"), name="Latest available",
+                    showlegend=False, hoverinfo="skip",
+                ))
+        fig.add_vline(x=0, line_color="#94a3b8", annotation_text="Previous expiry")
+        if current_expiry_days:
+            fig.add_vline(x=max(current_expiry_days), line_color="#94a3b8",
+                          annotation_text="Current expiry")
+        fig.add_hline(y=0, line_color="#64748b", line_width=1)
+        fig.update_layout(
+            template="plotly_dark", paper_bgcolor="black", plot_bgcolor="black",
+            title=title, xaxis=dict(title="Previous strategy ← rollover → Next strategy",
+                                   gridcolor="#333"),
+            yaxis=dict(title="Change from rollover", gridcolor="#333"),
+            hovermode="x unified", height=800,
         )
         return fig

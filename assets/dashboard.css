@@ -97,6 +97,4 @@ h3 { margin: 0 0 8px; font-size: 16px; }
 .aman-neutral { color: #cbd5e1; }
 .columns-panel label { color: #e2e8f0 !important; }
 .columns-panel input { accent-color: #64748b; }
-.chart-half,
-.correlation-half { width: 50%; min-width: 0; }
-.correlation-half { padding: 45px 4px 0 8px; box-sizing: border-box; }
+.chart-half { width: 50%; min-width: 0; }
