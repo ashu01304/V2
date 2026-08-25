@@ -41,6 +41,82 @@ import numpy as np
 class SeasonalStrategies:
 
     @staticmethod
+    def current_year_mean_reversion(hist_stats, live_trailing, holding_days=10,
+                                    stop_before_expiry=20, entry_zscore=2.0,
+                                    max_efficiency=0.35,
+                                    minimum_expected_move=0.0):
+        if hist_stats.get("DAYS_TO_EXPIRY", 0) < stop_before_expiry:
+            return "NONE", 0
+        live = live_trailing.dropna()
+        if len(live) < 25:
+            return "NONE", 0
+        mean, previous_mean = live.tail(20).mean(), live.iloc[-25:-5].mean()
+        std = live.tail(20).std()
+        previous_std = live.iloc[-21:-1].std()
+        if not std or pd.isna(std) or not previous_std or pd.isna(previous_std):
+            return "NONE", 0
+        zscore = (live.iloc[-1] - mean) / std
+        previous_zscore = (live.iloc[-2] - live.iloc[-21:-1].mean()) / previous_std
+        efficiency = abs(live.iloc[-1] - live.iloc[-11]) / live.diff().tail(10).abs().sum()
+        mean_distance = abs(live.iloc[-1] - mean)
+        flat_mean = abs(mean - previous_mean) / std <= 0.25
+        if (pd.isna(efficiency) or efficiency > max_efficiency or not flat_mean
+                or mean_distance <= minimum_expected_move):
+            return "NONE", 0
+        if previous_zscore <= -entry_zscore and zscore > -entry_zscore:
+            return "LONG", holding_days
+        if previous_zscore >= entry_zscore and zscore < entry_zscore:
+            return "SHORT", holding_days
+        return "NONE", 0
+
+    @staticmethod
+    def current_year_momentum(hist_stats, live_trailing, holding_days=10,
+                              stop_before_expiry=20,
+                              minimum_expected_move=0.0):
+        if hist_stats.get("DAYS_TO_EXPIRY", 0) < stop_before_expiry:
+            return "NONE", 0
+        live = live_trailing.dropna()
+        if len(live) < 25:
+            return "NONE", 0
+        fast = live.tail(5).mean()
+        slow = live.tail(20).mean()
+        previous_slow = live.iloc[-25:-5].mean()
+        changes = live.diff().tail(10)
+        ten_day_move = live.iloc[-1] - live.iloc[-11]
+        std = live.tail(20).std()
+        zscore = (live.iloc[-1] - slow) / std if pd.notna(std) and std else np.nan
+        if pd.isna(zscore) or abs(ten_day_move) <= minimum_expected_move:
+            return "NONE", 0
+        long_entry = (fast > slow and slow > previous_slow and ten_day_move > 0
+                      and (changes > 0).sum() >= 6 and 0 <= zscore <= 2.5
+                      and live.iloc[-2] <= fast and live.iloc[-1] > live.iloc[-2])
+        short_entry = (fast < slow and slow < previous_slow and ten_day_move < 0
+                       and (changes < 0).sum() >= 6 and -2.5 <= zscore <= 0
+                       and live.iloc[-2] >= fast and live.iloc[-1] < live.iloc[-2])
+        return (("LONG", holding_days) if long_entry else
+                ("SHORT", holding_days) if short_entry else ("NONE", 0))
+
+    @staticmethod
+    def strict_research(hist_stats, live_trailing, holding_days=10,
+                        long_rate=0.7, short_rate=0.3,
+                        stop_before_expiry=20, seasonality_bracket="10Y",
+                        minimum_expected_move=0.0, entry_zscore=1.6):
+        if hist_stats.get("DAYS_TO_EXPIRY", 0) < stop_before_expiry:
+            return "NONE", 0
+        up_rate = hist_stats.get(f"UpRate_{seasonality_bracket}_{holding_days}D", np.nan)
+        expected = hist_stats.get(f"Expected_{seasonality_bracket}_{holding_days}D", np.nan)
+        zscore = hist_stats.get("TECH_ZScore", np.nan)
+        if (pd.isna(up_rate) or pd.isna(expected) or pd.isna(zscore)
+                or len(live_trailing) < 20 or
+                abs(expected) <= minimum_expected_move):
+            return "NONE", 0
+        if up_rate >= long_rate and expected > 0 and zscore <= -entry_zscore:
+            return "LONG", holding_days
+        if up_rate <= short_rate and expected < 0 and zscore >= entry_zscore:
+            return "SHORT", holding_days
+        return "NONE", 0
+
+    @staticmethod
     def technical_zscore_rsi(hist_stats, live_trailing, holding_days=5,
                              z_score_threshold=1.85, upper_rsi=65,
                              lower_rsi=35, stop_before_expiry=63):

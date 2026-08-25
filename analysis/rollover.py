@@ -45,6 +45,11 @@ class StrategyRollover:
             end_expiry = ordered[rollover_index + 1][0]
 
             values = self._expression_values(symbol, shifted_expression)
+            active = rollover_expiry <= latest_market_date < end_expiry
+            if active:
+                values = self._append_latest_minute_value(
+                    symbol, shifted_expression, values, end_expiry
+                )
             values = values[(values.index >= start_expiry) & (values.index <= end_expiry)]
             if values.empty:
                 warnings.append(f"{shifted_expression}: no data inside monthly window")
@@ -63,7 +68,7 @@ class StrategyRollover:
             ))
             series[shifted_expression] = {
                 "expression": shifted_expression,
-                "active": rollover_expiry <= latest_market_date < end_expiry,
+                "active": active,
                 "data": data,
                 "current_expiry_day": int(np.busday_count(
                     rollover_expiry.to_datetime64().astype("datetime64[D]"),
@@ -101,6 +106,30 @@ class StrategyRollover:
             return pd.Series(dtype=float)
         data = pd.DataFrame({code: histories[code]["Close"] for code in codes}).dropna()
         return evaluate_expression(expression, data)
+
+    def _append_latest_minute_value(self, symbol, expression, values, end_expiry):
+        """Append one newest minute value to the active rollover series."""
+        if values.empty or not hasattr(self.db, "synthetic"):
+            return values
+        minute_product = {"CO": "LCO"}.get(symbol, symbol)
+        try:
+            minute = self.db.synthetic(
+                minute_product, expression,
+                start=pd.Timestamp(values.index.max(), tz="UTC"),
+            )
+        except Exception:
+            return values
+        if minute.empty:
+            return values
+        minute = minute.dropna(subset=["timestamp", "price"]).sort_values("timestamp")
+        if minute.empty:
+            return values
+        latest_date = pd.Timestamp(minute["timestamp"].iloc[-1]).tz_localize(None).normalize()
+        if latest_date <= values.index.max().normalize() or latest_date > end_expiry:
+            return values
+        output = values.copy()
+        output.loc[latest_date] = float(minute["price"].iloc[-1])
+        return output.sort_index()
 
     def _official_expiry(self, symbol, contract):
         if not contract:

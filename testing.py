@@ -1,124 +1,192 @@
-from analysis.plotting import OHLCPlotter
-from database.api_manager import APIDatabaseManager
-from Mini_Tools.api_data_sync import sync
+"""STUMPY experiment for discovering repeated intraday synthetic-price patterns."""
+
+import argparse
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
 import pandas as pd
-from dash import Dash, dcc, html
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import stumpy
+
+from market_data import MarketData
 
 
-# API parameters
-INSTRUMENTS = ["COZ27"]
-INTERVAL = "1H"              # 1M, 5M, 1H, or 1D
-COUNT = 401                  # Use None when supplying START and END
-START = None                 # Optional Unix timestamp in seconds
-END = None                   # Optional Unix timestamp in seconds
-# Plot parameters
-FETCH_FROM_API = True        # False loads previously stored candles only
-CHART_TYPE = "candlestick"  # candlestick or line
-X_AXIS = "candle_number"    # candle_number or datetime
-CHART_TITLE = "QH API OHLC"
-CHART_HEIGHT = 1200
-CORRELATION_WINDOWS = [7, 14, 21, 42, 50, 100]
-BOLLINGER_WINDOW = 20
-BOLLINGER_STD =1.8
-BOLLINGER_METHOD = "ewm"
-HOST = "127.0.0.1"
-PORT = 8051
+DEFAULT_PRODUCT = "CL"
+DEFAULT_EXPRESSION = "X26-2*Z26+F27"
+OUTPUT_DIRECTORY = Path("stumpy_outputs")
 
 
-def support_resistance(frame):
-    df = frame.tail(100).copy()
-    previous = df["Close"].shift()
-    true_range = pd.concat([
-        df["High"] - df["Low"],
-        (df["High"] - previous).abs(),
-        (df["Low"] - previous).abs(),
-    ], axis=1).max(axis=1)
-    atr = true_range.rolling(14).mean().iloc[-1]
-    if pd.isna(atr) or atr == 0:
-        return {}
+def load_candles(product, expression, interval, history_days, minimum_coverage):
+    database = MarketData()
+    try:
+        start = pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=history_days)
+        minute = database.synthetic(product, expression, start=start)
+    finally:
+        database.close()
+    if minute.empty:
+        raise ValueError("No minute data is available for the requested synthetic expression")
 
-    swings = []
-    for i in range(3, len(df) - 3):
-        high, low = df["High"].iloc[i], df["Low"].iloc[i]
-        if high > df["High"].iloc[i - 3:i].max() and high > df["High"].iloc[i + 1:i + 4].max():
-            swings.append((i, high, "high"))
-        if low < df["Low"].iloc[i - 3:i].min() and low < df["Low"].iloc[i + 1:i + 4].min():
-            swings.append((i, low, "low"))
+    price = (minute.dropna(subset=["timestamp", "price"])
+             .sort_values("timestamp").set_index("timestamp")["price"])
+    candles = price.resample(interval).agg(
+        open="first", high="max", low="min", close="last", observations="count"
+    )
+    expected = pd.Timedelta(interval) / pd.Timedelta(minutes=1)
+    candles["coverage"] = candles["observations"] / expected
+    candles = candles[candles["coverage"] >= minimum_coverage].dropna(
+        subset=["open", "high", "low", "close"]
+    )
+    if candles.empty:
+        raise ValueError("No candles passed the selected data-coverage requirement")
+    return candles
 
-    zones = []
-    for point in swings:
-        zone = next((z for z in zones if abs(z["price"] - point[1]) <= .3 * atr), None)
-        if zone:
-            zone["points"].append(point)
-            zone["price"] = sum(p[1] for p in zone["points"]) / len(zone["points"])
-        else:
-            zones.append({"price": point[1], "points": [point]})
 
-    scored = []
-    for zone in zones:
-        touches = []
-        for point in sorted(zone["points"]):
-            if not touches or point[0] - touches[-1][0] >= 3:
-                touches.append(point)
-        if len(touches) < 2:
+def discover_motifs(candles, pattern_bars, motif_count, distance_multiplier):
+    close = candles["close"].to_numpy(dtype=np.float64)
+    if pattern_bars < 3 or pattern_bars >= len(close) // 2:
+        raise ValueError("Pattern length must be at least 3 and below half the candle count")
+
+    matrix_profile = stumpy.stump(close, m=pattern_bars)
+    distances = matrix_profile[:, 0].astype(float)
+    neighbours = matrix_profile[:, 1].astype(int)
+    selected, motifs, occurrences = [], [], []
+    for first in np.argsort(distances):
+        second = neighbours[first]
+        if second < 0 or not np.isfinite(distances[first]):
             continue
-        rejection = sum(
-            ((point[1] - df["Low"].iloc[point[0] + 1:point[0] + 4].min()) if point[2] == "high"
-             else (df["High"].iloc[point[0] + 1:point[0] + 4].max() - point[1])) / atr
-            for point in touches
-        ) / len(touches)
-        recency = 1 - (len(df) - 1 - touches[-1][0]) / len(df)
-        scored.append((zone["price"], len(touches) * 2 + rejection + recency))
+        if any(abs(first - used) < pattern_bars or abs(second - used) < pattern_bars
+               for used in selected):
+            continue
+        motif_id = len(motifs) + 1
+        base_distance = float(distances[first])
+        threshold = max(base_distance * distance_multiplier, np.finfo(float).eps)
+        query = close[first:first + pattern_bars]
+        matches = stumpy.match(query, close, max_distance=threshold)
+        valid_matches = []
+        for distance, index in matches:
+            index = int(index)
+            if any(abs(index - existing[1]) < pattern_bars for existing in valid_matches):
+                continue
+            valid_matches.append((float(distance), index))
+        if len(valid_matches) < 2:
+            valid_matches = [(base_distance, int(first)), (base_distance, int(second))]
+        motifs.append({
+            "Motif": motif_id, "Matrix_Profile_Distance": base_distance,
+            "Match_Threshold": threshold, "Occurrences": len(valid_matches),
+            "Pattern_Bars": pattern_bars,
+        })
+        for distance, index in valid_matches:
+            end_index = index + pattern_bars - 1
+            occurrences.append({
+                "Motif": motif_id, "Distance": distance,
+                "Start_Index": index, "End_Index": end_index,
+                "Start": candles.index[index], "End": candles.index[end_index],
+            })
+        selected.extend(index for _, index in valid_matches)
+        if len(motifs) >= motif_count:
+            break
+    profile = pd.DataFrame({
+        "Start": candles.index[:len(distances)], "Distance": distances,
+        "Nearest_Index": neighbours,
+    })
+    return pd.DataFrame(motifs), pd.DataFrame(occurrences), profile
 
-    price = df["Close"].iloc[-1]
-    choose = lambda items: max(items, key=lambda z: z[1] - .1 * abs(z[0] - price) / atr)[0] if items else None
-    levels = {"Support": choose([z for z in scored if z[0] < price]),
-              "Resistance": choose([z for z in scored if z[0] > price])}
-    return {name: value for name, value in levels.items() if value is not None}
+
+def make_figure(candles, occurrences, profile, title):
+    figure = make_subplots(
+        rows=3, cols=1, vertical_spacing=0.08,
+        subplot_titles=("Candles and discovered occurrences",
+                        "Normalized motif shapes", "Matrix profile"),
+        row_heights=[0.52, 0.28, 0.20],
+    )
+    figure.add_trace(go.Candlestick(
+        x=candles.index, open=candles["open"], high=candles["high"],
+        low=candles["low"], close=candles["close"], name="OHLC",
+        increasing_line_color="#16a34a", decreasing_line_color="#dc2626",
+    ), row=1, col=1)
+    colors = ["#2563eb", "#9333ea", "#ea580c", "#0891b2", "#ca8a04",
+              "#db2777", "#4f46e5", "#059669"]
+    for _, occurrence in occurrences.iterrows():
+        motif = int(occurrence["Motif"])
+        color = colors[(motif - 1) % len(colors)]
+        figure.add_vrect(
+            x0=occurrence["Start"], x1=occurrence["End"],
+            fillcolor=color, opacity=0.16, line_width=1, line_color=color,
+            row=1, col=1,
+        )
+        segment = candles["close"].iloc[
+            int(occurrence["Start_Index"]):int(occurrence["End_Index"]) + 1
+        ].to_numpy(dtype=float)
+        std = segment.std()
+        normalized = (segment - segment.mean()) / std if std else segment - segment.mean()
+        figure.add_trace(go.Scatter(
+            x=np.arange(len(normalized)), y=normalized, mode="lines",
+            line={"color": color, "width": 1.5},
+            name=f"Motif {motif}: {occurrence['Start']:%Y-%m-%d %H:%M}",
+            legendgroup=f"motif-{motif}",
+        ), row=2, col=1)
+    figure.add_trace(go.Scatter(
+        x=profile["Start"], y=profile["Distance"], mode="lines",
+        name="Matrix-profile distance", line={"color": "#334155", "width": 1},
+    ), row=3, col=1)
+    figure.update_layout(
+        title=title, template="plotly_white", height=1100,
+        xaxis_rangeslider_visible=False, hovermode="x unified",
+    )
+    return figure
+
+
+def save_outputs(candles, motifs, occurrences, profile, figure, parameters):
+    OUTPUT_DIRECTORY.mkdir(exist_ok=True)
+    safe_expression = parameters["expression"].replace("*", "x").replace("+", "p")
+    stem = (f"stumpy_{parameters['product']}_{safe_expression}_"
+            f"{parameters['interval']}_m{parameters['pattern_bars']}_"
+            f"{datetime.now():%Y%m%d_%H%M%S}")
+    html_path = OUTPUT_DIRECTORY / f"{stem}.html"
+    excel_path = OUTPUT_DIRECTORY / f"{stem}.xlsx"
+    figure.write_html(html_path, include_plotlyjs="cdn")
+    with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
+        pd.DataFrame({"Parameter": parameters.keys(),
+                      "Value": parameters.values()}).to_excel(
+            writer, sheet_name="Parameters", index=False
+        )
+        motifs.to_excel(writer, sheet_name="Motifs", index=False)
+        occurrences.to_excel(writer, sheet_name="Occurrences", index=False)
+        profile.to_excel(writer, sheet_name="Matrix_Profile", index=False)
+        candles.reset_index().to_excel(writer, sheet_name="Candles", index=False)
+    return html_path.resolve(), excel_path.resolve()
 
 
 def main():
-    if FETCH_FROM_API:
-        sync(INSTRUMENTS, INTERVAL, COUNT, START, END)
-
-    database = APIDatabaseManager()
-    try:
-        data = database.load_ohlc(INSTRUMENTS, INTERVAL)
-    finally:
-        database.close()
-
-    closes = pd.concat(
-        {name: frame["Close"] for name, frame in data.items()}, axis=1
-    ).dropna()
-    if len(closes.columns) == 2:
-        correlations = {
-            bars: closes.tail(bars).corr().iloc[0, 1]
-            for bars in CORRELATION_WINDOWS if len(closes) >= bars
-        }
-        print("\nClose-price correlation (common bars):")
-        print(pd.Series(correlations, name="Correlation").to_string())
-    else:
-        print("Correlation unavailable: both contracts need stored data.")
-
-    levels = {name: support_resistance(frame) for name, frame in data.items()}
-    print("Support/resistance:", levels)
-
-    figure = OHLCPlotter().plot(
-        data=data,
-        chart_type=CHART_TYPE,
-        title=CHART_TITLE,
-        height=CHART_HEIGHT,
-        x_axis=X_AXIS,
-        show=False,
-        bollinger_window=BOLLINGER_WINDOW,
-        bollinger_std=BOLLINGER_STD,
-        bollinger_method=BOLLINGER_METHOD,
-        levels=levels,
+    parser = argparse.ArgumentParser(description="Discover repeated minute-data patterns")
+    parser.add_argument("--product", default=DEFAULT_PRODUCT)
+    parser.add_argument("--expression", default=DEFAULT_EXPRESSION)
+    parser.add_argument("--interval", default="30min", choices=["15min", "30min", "60min"])
+    parser.add_argument("--pattern-bars", type=int, default=12)
+    parser.add_argument("--motifs", type=int, default=5)
+    parser.add_argument("--history-days", type=int, default=150)
+    parser.add_argument("--distance-multiplier", type=float, default=1.25)
+    parser.add_argument("--minimum-coverage", type=float, default=0.60)
+    args = parser.parse_args()
+    parameters = vars(args)
+    candles = load_candles(
+        args.product, args.expression, args.interval,
+        args.history_days, args.minimum_coverage,
     )
-    app = Dash(__name__)
-    app.layout = html.Div(dcc.Graph(figure=figure))
-    print(f"OHLC chart: http://{HOST}:{PORT}")
-    app.run(host=HOST, port=PORT, debug=False)
+    motifs, occurrences, profile = discover_motifs(
+        candles, args.pattern_bars, args.motifs, args.distance_multiplier,
+    )
+    title = (f"STUMPY motifs | {args.product} {args.expression} | "
+             f"{args.interval} | {args.pattern_bars}-bar patterns")
+    figure = make_figure(candles, occurrences, profile, title)
+    html_path, excel_path = save_outputs(
+        candles, motifs, occurrences, profile, figure, parameters,
+    )
+    print(f"Interactive chart: {html_path}")
+    print(f"Excel details: {excel_path}")
+    figure.show()
 
 
 if __name__ == "__main__":

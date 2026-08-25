@@ -30,6 +30,7 @@ class Seasonality:
         series_out, warnings = {}, []
         years = self._contract_years(symbol, ref_month, start_year, end_year)
 
+        latest_requested_year = max(years) if years else None
         for s in years:
             anchor_code = f"{ref_month}{s % 100:02d}"
             anchor_hist = self.db.get_contract_history(symbol, [anchor_code]).get(anchor_code)
@@ -62,6 +63,17 @@ class Seasonality:
 
             result = evaluate_expression(expression, leg_df)
             result = result[result.index <= expiry]
+            if s == latest_requested_year:
+                live, live_warning = self._live_daily_overlay(
+                    symbol, expression, s % 100 - ref_year_in_expr,
+                    result.index.max() if not result.empty else None,
+                    expiry,
+                )
+                if live_warning:
+                    warnings.append(live_warning)
+                if not live.empty:
+                    result = pd.concat([result, live]).sort_index()
+                    result = result[~result.index.duplicated(keep="last")]
             if result.empty:
                 warnings.append(f"{s}: expression evaluated to empty series")
                 continue
@@ -83,6 +95,48 @@ class Seasonality:
             }, index=days_to_expiry)
 
         return self._package_working_days(series_out, warnings, window_days)
+
+    def _live_daily_overlay(self, symbol, expression, year_shift,
+                            last_settlement_date, expiry):
+        """Append one newest minute-derived value to the latest plotted year."""
+        if last_settlement_date is None or not hasattr(self.db, "synthetic"):
+            return pd.Series(dtype=float), None
+        shifted_legs = [
+            (coefficient, shift_contract_year(contract, year_shift))
+            for coefficient, contract in parse_expression(expression)
+        ]
+        shifted_expression = self._format_expression(shifted_legs)
+        minute_product = {"CO": "LCO"}.get(symbol, symbol)
+        try:
+            start = pd.Timestamp(last_settlement_date, tz="UTC")
+            minute = self.db.synthetic(
+                minute_product, shifted_expression, start=start
+            )
+        except Exception as error:
+            return pd.Series(dtype=float), f"Live overlay unavailable: {error}"
+        if minute.empty:
+            return pd.Series(dtype=float), None
+
+        prices = (minute.dropna(subset=["timestamp", "price"])
+                  .sort_values("timestamp").set_index("timestamp")["price"])
+        latest_timestamp = prices.index.max()
+        latest_date = pd.Timestamp(latest_timestamp).tz_localize(None).normalize()
+        last_date = pd.Timestamp(last_settlement_date).normalize()
+        if latest_date <= last_date or latest_date > expiry:
+            return pd.Series(dtype=float), None
+        return pd.Series(
+            [float(prices.iloc[-1])], index=[latest_date], name="live_overlay"
+        ), None
+
+    @staticmethod
+    def _format_expression(legs):
+        parts = []
+        for index, (coefficient, contract) in enumerate(legs):
+            sign = "-" if coefficient < 0 else "+" if index else ""
+            size = abs(coefficient)
+            multiplier = "" if size == 1 else f"{size:g}*"
+            parts.append(f"{sign}{multiplier}{contract}")
+        return "".join(parts)
 
     def official_or_last_date(self, symbol, contract_code, history):
         official = self.official_expiry.get(symbol, contract_code)

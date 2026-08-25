@@ -2,6 +2,7 @@ import json
 import pandas as pd
 import numpy as np
 import math
+from pathlib import Path
 from analysis.expression import parse_expression, shift_contract_year
 from analysis.utils import year_columns
 
@@ -126,7 +127,9 @@ def get_stability_metrics(sznlty, symbol, expression, start_year, end_year, wind
     }
 def score_expression_universe(sznlty, symbol, start_year, end_year, window_days,
                               score_function=get_stability_metrics,
-                              expressions_file="contracts_list.json", output_file="temp.xlsx"):
+                              expressions_file=(Path(__file__).resolve().parents[1]
+                                                / "data" / "contracts_list.json"),
+                              output_file="temp.xlsx"):
     with open(expressions_file, encoding="utf-8") as file:
         expression_data = json.load(file)
 

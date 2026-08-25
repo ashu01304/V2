@@ -1,7 +1,7 @@
 from pathlib import Path
 import pandas as pd
 
-EXPIRY_DATES_PATH = Path(__file__).parent.parent / "expiry_dates.csv"
+EXPIRY_DATES_PATH = Path(__file__).parent.parent / "data" / "expiry_dates.csv"
 
 class OfficialExpiryLookup:
     def __init__(self, path=EXPIRY_DATES_PATH):

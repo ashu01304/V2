@@ -1,0 +1,35 @@
+.seac-pattern-page input {
+    color: #111827 !important;
+    background: #ffffff !important;
+}
+
+.seac-pattern-page .Select-control,
+.seac-pattern-page .Select-menu-outer,
+.seac-pattern-page .Select-value-label,
+.seac-pattern-page .Select-placeholder {
+    color: #111827 !important;
+    background-color: #ffffff !important;
+}
+
+.seac-pattern-page .dash-table-container,
+.seac-pattern-page .dash-spreadsheet-container,
+.seac-pattern-page .dash-cell,
+.seac-pattern-page .dash-header {
+    color: #111827 !important;
+}
+
+.seac-pattern-page .dash-cell {
+    background-color: #ffffff !important;
+}
+
+.seac-pattern-page .dash-header {
+    background-color: #e5e7eb !important;
+}
+
+.seac-pattern-page .dash-table-container {
+    width: 100% !important;
+}
+
+.seac-pattern-page .dash-cell {
+    min-width: 95px;
+}

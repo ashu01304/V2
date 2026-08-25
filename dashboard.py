@@ -1,18 +1,19 @@
 import json
+from pathlib import Path
 from threading import Lock, Thread
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, ctx, dcc, html, dash_table
 
-from database.manager import DatabaseManager
+from market_data import MarketData
 from analysis.expression import parse_expression
 from analysis.feature_creation import FeatureCreator
 from analysis.plotting import SeasonalityPlotter
 from analysis.rollover import StrategyRollover
 from analysis.seasonality import Seasonality
 
-CONTRACTS_FILE = "contracts_list.json"
+CONTRACTS_FILE = Path(__file__).resolve().parent / "data" / "contracts_list.json"
 RANK_YEARS = 4
 ZSCORE_WINDOW = 42
 SLOPE_DAYS = 10
@@ -69,7 +70,7 @@ def expression_metrics(sznlty, features, symbol, expression, rank_years,
 def calculate_dashboard(universe, selected_columns, symbol, rank_years, zscore_window,
                         slope_days, job_id):
     names = ("values", "ranks", "zscores", "slopes", "directions", "aman")
-    results, db = {}, DatabaseManager()
+    results, db = {}, MarketData()
     sznlty, features = Seasonality(db), FeatureCreator()
     empty_frame = pd.DataFrame(
         None, index=range(len(universe["contracts"])),
@@ -196,7 +197,7 @@ def make_display(frames):
         ]
     return display
 
-product_db = DatabaseManager()
+product_db = MarketData()
 try:
     product_db.cursor.execute("SELECT DISTINCT symbol FROM seac_settlements ORDER BY symbol")
     products = [row[0] for row in product_db.cursor.fetchall()]
@@ -439,7 +440,7 @@ def toggle_chart(cell, _, __):
 def update_rollover(selection):
     if not selection:
         return go.Figure()
-    db = DatabaseManager()
+    db = MarketData()
     try:
         result = StrategyRollover(db).calculate(
             selection["symbol"], selection["expression"]

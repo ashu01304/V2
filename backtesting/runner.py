@@ -2,7 +2,7 @@ import pandas as pd
 
 from analysis.seasonality import Seasonality
 from backtesting.risk_engine import RiskManagedBacktester
-from database.manager import DatabaseManager
+from market_data import MarketData
 
 
 def run_backtest(symbol, data_start_year, test_start_year, data_end_year, window_days,
@@ -10,7 +10,8 @@ def run_backtest(symbol, data_start_year, test_start_year, data_end_year, window
                  engine_config=None, expression=None, minimum_latest_score=0,
                  minimum_trend_score=0, Neighboring_Buckets_Score=0, scores_file="temp.xlsx",
                  seasonality_function="working_day_expression_seasonality",
-                 output_file="backtest_report.xlsx"):
+                 output_file="backtest_report.xlsx", database=None,
+                 seasonality_result=None):
     engine_config = engine_config or {}
     if expression:
         universe = pd.DataFrame({"Expression": [expression]})
@@ -21,14 +22,17 @@ def run_backtest(symbol, data_start_year, test_start_year, data_end_year, window
                             & (universe["Neighboring_Buckets_Score"] >= Neighboring_Buckets_Score)]
 
     all_trades, errors = [], []
-    db = DatabaseManager()
+    db = database or MarketData()
+    owns_database = database is None
     try:
         fetch = getattr(Seasonality(db), seasonality_function)
         for _, row in universe.iterrows():
             current_expression = row["Expression"]
             try:
-                result = fetch(symbol, current_expression, start_year=data_start_year,
-                               end_year=data_end_year, window_days=window_days)
+                result = seasonality_result or fetch(
+                    symbol, current_expression, start_year=data_start_year,
+                    end_year=data_end_year, window_days=window_days
+                )
                 if result["combined"].empty:
                     raise ValueError("No seasonality data")
 
@@ -49,7 +53,8 @@ def run_backtest(symbol, data_start_year, test_start_year, data_end_year, window
             except Exception as error:
                 errors.append({"Expression": current_expression, "Error": str(error)})
     finally:
-        db.close()
+        if owns_database:
+            db.close()
 
     trades = pd.concat(all_trades, ignore_index=True) if all_trades else pd.DataFrame()
     errors = pd.DataFrame(errors)
@@ -63,13 +68,14 @@ def run_backtest(symbol, data_start_year, test_start_year, data_end_year, window
                                      window_days, strategy_func.__name__, str(features),
                                      str(strategy_config), str(engine_config)]})
 
-    with pd.ExcelWriter(output_file) as writer:
-        trades.to_excel(writer, sheet_name="Trades", index=False)
-        expression_summary.to_excel(writer, sheet_name="By_Expression", index=False)
-        yearly_summary.to_excel(writer, sheet_name="By_Year", index=False)
-        exit_summary.to_excel(writer, sheet_name="By_Exit", index=False)
-        errors.to_excel(writer, sheet_name="Errors", index=False)
-        config.to_excel(writer, sheet_name="Configuration", index=False)
+    if output_file:
+        with pd.ExcelWriter(output_file) as writer:
+            trades.to_excel(writer, sheet_name="Trades", index=False)
+            expression_summary.to_excel(writer, sheet_name="By_Expression", index=False)
+            yearly_summary.to_excel(writer, sheet_name="By_Year", index=False)
+            exit_summary.to_excel(writer, sheet_name="By_Exit", index=False)
+            errors.to_excel(writer, sheet_name="Errors", index=False)
+            config.to_excel(writer, sheet_name="Configuration", index=False)
 
     return {"trades": trades, "expression_summary": expression_summary,
             "yearly_summary": yearly_summary, "exit_summary": exit_summary,

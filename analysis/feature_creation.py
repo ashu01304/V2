@@ -46,6 +46,10 @@ class FeatureCreator:
         if "LIVE_STD" in features:
             output["LIVE_STD"] = live.tail(features["LIVE_STD"].get("window", 20)).std()
 
+        if "LIVE_MEAN_DISTANCE" in features:
+            window = features["LIVE_MEAN_DISTANCE"].get("window", 20)
+            output["LIVE_MEAN_DISTANCE"] = abs(live.iloc[-1] - live.tail(window).mean())
+
         return pd.Series(output, dtype=float)
 
     def calculate_live_technical_features(self, live_trailing, window_bb=20, window_rsi=14):
