@@ -1,0 +1,19 @@
+.research-page { min-height: 100vh; padding: 14px; background: #0b1220; color: #f8fafc; }
+.research-controls { max-width: 1100px; margin-bottom: 12px; }
+.research-controls > .dash-dropdown { width: 360px; }
+.research-controls label { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+.research-controls label input { width: 90px; }
+.research-strategies { margin-top: 10px; }
+.research-strategies label { display: inline-flex; margin: 4px 12px 0 0; gap: 3px; }
+.research-strategies label input { width: auto; }
+.backtest-controls { display: flex; gap: 14px; align-items: center; margin-bottom: 10px; }
+.backtest-controls label { display: flex; gap: 5px; align-items: center; }
+.backtest-controls input { width: 85px; color: #111827; background: white; }
+.research-controls input, .research-controls button { min-height: 36px; }
+.research-summary { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin: 14px 0; }
+.research-card { padding: 10px; border: 1px solid #354258; background: #111827; text-align: center; }
+.research-card div { margin-top: 4px; font-size: 20px; }
+.research-page .Select-control, .research-page .Select-menu-outer,
+.research-page .Select-value-label, .research-page .Select-input input {
+    background: white !important; color: #111827 !important;
+}
