@@ -51,18 +51,19 @@ def main():
         return
 
     logging.info("Hourly market-data updater started")
+    include_settlements = True
     try:
         while True:
             started = time.monotonic()
             try:
-                result = update()
+                result = update(include_settlements=include_settlements)
                 message = (
                     "Market-data update completed successfully | "
                     f"new spread points: {result['spread_added']:,} | "
                     f"new settlement points: {result['settlement_added']:,}"
                 )
-                print(message, flush=True)
                 logging.info(message)
+                include_settlements = False
             except Exception:
                 logging.exception("Market-data update failed; it will retry next hour")
 

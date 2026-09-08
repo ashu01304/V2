@@ -14,7 +14,7 @@ product_options = [
     for product in products
 ]
 app = Dash(__name__)
-app.title = "Intraday Hidden Patterns"
+app.title = "Intraday Patterns"
 state_lock = Lock()
 scan_state = {"job": 0, "processing": False, "status": "Ready.",
               "figure": {}, "data": [], "columns": []}

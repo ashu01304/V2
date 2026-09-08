@@ -3,11 +3,13 @@ import pandas as pd
 
 from analysis.expression import evaluate_expression, parse_expression, shift_contract_year
 from analysis.expiry import OfficialExpiryLookup
+from market_data.live_client import LiveMarketDataClient
 
 
 class StrategyRollover:
-    def __init__(self, db):
+    def __init__(self, db, live=None):
         self.db = db
+        self.live = live or LiveMarketDataClient()
         self.official_expiry = OfficialExpiryLookup()
 
     def calculate(self, symbol, expression, periods=6):
@@ -50,6 +52,7 @@ class StrategyRollover:
                 values = self._append_latest_minute_value(
                     symbol, shifted_expression, values, end_expiry
                 )
+            live_date = values.attrs.get("live_date")
             values = values[(values.index >= start_expiry) & (values.index <= end_expiry)]
             if values.empty:
                 warnings.append(f"{shifted_expression}: no data inside monthly window")
@@ -60,6 +63,7 @@ class StrategyRollover:
             data = pd.DataFrame({
                 "value": values.values - base,
                 "date": dates,
+                "is_live": dates == live_date if live_date is not None else False,
                 "side": np.where(dates <= rollover_expiry,
                                  "Before monthly rollover", "After monthly rollover"),
             }, index=np.busday_count(
@@ -111,6 +115,17 @@ class StrategyRollover:
         """Append one newest minute value to the active rollover series."""
         if values.empty or not hasattr(self.db, "synthetic"):
             return values
+        try:
+            current = self.live.expression(symbol, expression)
+            latest_date = pd.Timestamp(current["timestamp"]).tz_localize(None).normalize()
+            if values.index.max().normalize() < latest_date <= end_expiry:
+                output = values.copy()
+                output.loc[latest_date] = float(current["value"])
+                output = output.sort_index()
+                output.attrs["live_date"] = latest_date
+                return output
+        except Exception:
+            pass
         minute_product = {"CO": "LCO"}.get(symbol, symbol)
         try:
             minute = self.db.synthetic(
@@ -129,7 +144,9 @@ class StrategyRollover:
             return values
         output = values.copy()
         output.loc[latest_date] = float(minute["price"].iloc[-1])
-        return output.sort_index()
+        output = output.sort_index()
+        output.attrs["live_date"] = latest_date
+        return output
 
     def _official_expiry(self, symbol, contract):
         if not contract:

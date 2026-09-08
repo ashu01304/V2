@@ -1,19 +1,19 @@
-import json
 from pathlib import Path
 from threading import Lock, Thread
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, State, ctx, dcc, html, dash_table
+from dash import Dash, Input, Output, State, ctx, dcc, html, dash_table, no_update
 
 from market_data import MarketData
 from analysis.expression import parse_expression
 from analysis.feature_creation import FeatureCreator
+from analysis.forward_curve import ForwardCurve
 from analysis.plotting import SeasonalityPlotter
 from analysis.rollover import StrategyRollover
 from analysis.seasonality import Seasonality
+from analysis.contract_universe import load_universe
 
-CONTRACTS_FILE = Path(__file__).resolve().parent / "data" / "contracts_list.json"
 RANK_YEARS = 4
 ZSCORE_WINDOW = 42
 SLOPE_DAYS = 10
@@ -176,9 +176,8 @@ def format_cell(value, rank, zscore, slope, direction, aman):
         "</div></div>"
     )
 
-# Load the organized expression matrix.
-with open(CONTRACTS_FILE, encoding="utf-8") as file:
-    universe = json.load(file)
+# Build the current expression matrix from expiry data.
+universe = load_universe()
 
 columns = universe["columns"]
 
@@ -225,6 +224,7 @@ def number_control(label, component_id, value, minimum, step):
                                     className="control-input"))
 
 app = Dash(__name__)
+app.title = "Market Curves"
 plotter = SeasonalityPlotter()
 app.layout = html.Div([
     html.H3("Select a product", id="page-title"),
@@ -249,6 +249,8 @@ app.layout = html.Div([
             options=[{"label": column, "value": column} for column in columns],
             value=[column for column in columns if not column.endswith("MS")],
             inline=True,
+            persistence=True,
+            persistence_type="local",
             inputStyle={"marginRight": "3px"},
             labelStyle={"marginRight": "10px"},
         ),
@@ -262,6 +264,8 @@ app.layout = html.Div([
                      {"label": "Aman B/S", "value": "aman"}],
             value=["slope", "zscore", "aman"],
             inline=True,
+            persistence=True,
+            persistence_type="local",
             inputStyle={"marginLeft": "8px", "marginRight": "3px"},
         ),
     ], className="highlight-options"),
@@ -295,17 +299,22 @@ app.layout = html.Div([
                 "backgroundColor": "#dc2626", "border": "none",
                 "borderRadius": "6px", "cursor": "pointer",
             }),
-            html.Div(dcc.Graph(id="seasonality-chart", style={"height": "82vh"}),
-                     className="chart-half"),
-            html.Div(dcc.Loading(dcc.Graph(id="rollover-chart", style={"height": "82vh"})),
-                     className="chart-half"),
+            dcc.Graph(id="seasonality-chart", style={
+                "height": "610px", "width": "100%", "flexShrink": "0"}),
+            html.Div([
+                dcc.Graph(id="rollover-chart", style={"height": "610px", "width": "50%"}),
+                dcc.Graph(id="forward-curve-chart", style={"height": "610px", "width": "50%"}),
+            ], style={"display": "flex", "width": "100%", "height": "610px",
+                      "flexShrink": "0", "marginTop": "12px"}),
         ], style={"position": "relative", "zIndex": "1001",
-                  "display": "flex", "backgroundColor": "black",
-                  "width": "96%", "height": "88vh", "padding": "10px"}),
+                  "display": "flex", "flexDirection": "column",
+                  "backgroundColor": "black", "overflowY": "auto",
+                  "width": "99%", "height": "90vh", "padding": "4px 4px 0"}),
     ], id="chart-modal", style={"display": "none"}),
     dcc.Store(id="data-version", data=0),
     dcc.Store(id="selected-cell"),
     dcc.Interval(id="refresh-results", interval=500, n_intervals=0, disabled=True),
+    dcc.Interval(id="live-chart-refresh", interval=10_000, n_intervals=0),
 ], style={"backgroundColor": "#0b1220", "color": "#f8fafc",
           "minHeight": "100vh", "padding": "8px"})
 
@@ -410,11 +419,32 @@ def highlight_cells(slope_threshold, zscore_threshold, selected, _):
     Input("contracts-table", "active_cell"),
     Input("close-modal", "n_clicks"),
     Input("modal-backdrop", "n_clicks"),
+    Input("live-chart-refresh", "n_intervals"),
+    State("selected-cell", "data"),
     prevent_initial_call=True,
 )
-def toggle_chart(cell, _, __):
+def toggle_chart(cell, _, __, ___, selected_cell):
     hidden = {"display": "none"}
-    if ctx.triggered_id in {"close-modal", "modal-backdrop"} or not cell or cell["column_id"] == "Contract":
+    if ctx.triggered_id in {"close-modal", "modal-backdrop"}:
+        return go.Figure(), hidden, None
+    if ctx.triggered_id == "live-chart-refresh":
+        if not selected_cell:
+            return no_update, no_update, no_update
+        expression = selected_cell["expression"]
+        symbol = selected_cell["symbol"]
+        years = selected_cell["years"]
+        db = MarketData()
+        try:
+            result = Seasonality(db).working_day_expression_seasonality(
+                symbol, expression, min(years), max(years),
+                selected_cell.get("window_days", 400),
+            )
+        finally:
+            db.close()
+        return plotter.build_seasonality_figure(
+            result, expression, height=610
+        ), no_update, no_update
+    if not cell or cell["column_id"] == "Contract":
         return go.Figure(), hidden, None
     with state_lock:
         display = dashboard_state["display"].copy()
@@ -428,16 +458,18 @@ def toggle_chart(cell, _, __):
     modal = {"display": "flex", "position": "fixed", "inset": "0", "zIndex": "1000",
              "backgroundColor": "rgba(0,0,0,0.75)", "alignItems": "center",
              "justifyContent": "center"}
-    return (plotter.build_seasonality_figure(result, expression), modal,
+    return (plotter.build_seasonality_figure(result, expression, height=610), modal,
             {"contract": contract, "strategy": cell["column_id"],
              "expression": expression, "symbol": symbol,
-             "years": sorted(result.get("series", {}))})
+             "years": sorted(result.get("series", {})),
+             "window_days": max(400, int(abs(result["combined"].index.min())))})
 
 @app.callback(
     Output("rollover-chart", "figure"),
     Input("selected-cell", "data"),
+    Input("live-chart-refresh", "n_intervals"),
 )
-def update_rollover(selection):
+def update_rollover(selection, _):
     if not selection:
         return go.Figure()
     db = MarketData()
@@ -448,5 +480,24 @@ def update_rollover(selection):
     finally:
         db.close()
     return plotter.build_rollover_figure(
-        result, f"{selection['strategy']} Strategy Rollover"
+        result, f"{selection['strategy']} Strategy Rollover", height=610
+    )
+
+@app.callback(
+    Output("forward-curve-chart", "figure"),
+    Input("selected-cell", "data"),
+    Input("live-chart-refresh", "n_intervals"),
+)
+def update_forward_curve(selection, _):
+    if not selection:
+        return go.Figure()
+    curve = ForwardCurve()
+    try:
+        result = curve.calculate(selection["symbol"], selection["expression"])
+    except Exception:
+        result = {"live": [], "settlements": []}
+    finally:
+        curve.close()
+    return plotter.build_forward_curve_figure(
+        result, selection["symbol"], selection["expression"], height=610
     )

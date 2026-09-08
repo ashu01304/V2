@@ -2,10 +2,12 @@ import numpy as np
 import pandas as pd
 from analysis.expiry import OfficialExpiryLookup
 from analysis.expression import evaluate_expression, parse_expression, shift_contract_year
+from market_data.live_client import LiveMarketDataClient
 
 class Seasonality:
-    def __init__(self, db):
+    def __init__(self, db, live=None):
         self.db = db
+        self.live = live or LiveMarketDataClient()
         self.official_expiry = OfficialExpiryLookup()
 
     def _contract_years(self, symbol, letter, start_year, end_year=None):
@@ -63,6 +65,7 @@ class Seasonality:
 
             result = evaluate_expression(expression, leg_df)
             result = result[result.index <= expiry]
+            live_date = None
             if s == latest_requested_year:
                 live, live_warning = self._live_daily_overlay(
                     symbol, expression, s % 100 - ref_year_in_expr,
@@ -72,6 +75,7 @@ class Seasonality:
                 if live_warning:
                     warnings.append(live_warning)
                 if not live.empty:
+                    live_date = live.index[-1]
                     result = pd.concat([result, live]).sort_index()
                     result = result[~result.index.duplicated(keep="last")]
             if result.empty:
@@ -91,7 +95,8 @@ class Seasonality:
 
             series_out[s] = pd.DataFrame({
                 "value": result.values,
-                "date": result.index
+                "date": result.index,
+                "is_live": result.index == live_date if live_date is not None else False,
             }, index=days_to_expiry)
 
         return self._package_working_days(series_out, warnings, window_days)
@@ -107,6 +112,15 @@ class Seasonality:
         ]
         shifted_expression = self._format_expression(shifted_legs)
         minute_product = {"CO": "LCO"}.get(symbol, symbol)
+        try:
+            current = self.live.expression(symbol, shifted_expression)
+            latest_date = pd.Timestamp(current["timestamp"]).tz_localize(None).normalize()
+            last_date = pd.Timestamp(last_settlement_date).normalize()
+            if last_date < latest_date <= expiry:
+                return pd.Series([float(current["value"])], index=[latest_date],
+                                 name="live_overlay"), None
+        except Exception:
+            pass
         try:
             start = pd.Timestamp(last_settlement_date, tz="UTC")
             minute = self.db.synthetic(

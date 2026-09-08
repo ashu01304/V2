@@ -29,20 +29,29 @@ pip install duckdb pandas requests ijson
 The corporate Insight certificate is not available to Python, so both internal
 downloads currently use `verify=False` and suppress the related warning.
 
-## Updating the database
+## Running the updater
 
-The completed spread database is already stored as `master_database.duckdb`.
-Run the same command for the first SEAC update and every later update:
+There is one operational entry point:
 
 ```powershell
-python -m market_data
+python -m market_data.watch
 ```
 
-### Automatic hourly updates
+When the watcher starts, it downloads minute spreads and SEAC settlements immediately.
+Later hourly cycles update minute spreads only; SEAC runs once per watcher start.
 
-Double-click `start_market_data_sync.bat` in the project root. It starts a
-background process that updates immediately and then once every hour. Only one
-copy can run at a time. Progress and errors are written to
+Contract expressions are generated at runtime from `data/expiry_dates.csv` and
+`data/contract_universe_config.json`; no generated contract-list file is needed.
+Add custom structures to `custom_structures` in the config, for example:
+
+```json
+{"name": "C6", "coefficients": [1, 0, -1, -1, 0, 1], "steps": [1]}
+```
+
+The coefficients use consecutive expiry positions; zeroes skip legs. The
+coefficient sum must be zero for minute data reconstructed from stored spreads.
+
+Only one watcher can run at a time. Progress and errors are written to
 `data/market_data_sync.log`.
 
 The full source files are downloaded because neither source provides a known

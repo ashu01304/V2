@@ -1,7 +1,5 @@
-import json
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -14,17 +12,14 @@ from sklearn.metrics import brier_score_loss
 from sklearn.base import clone
 
 from analysis.seasonality import Seasonality
+from analysis.contract_universe import load_universe as load_generated_universe
 from analysis.expression import parse_expression, shift_contract_year
 from analysis.rollover import StrategyRollover
 from market_data import MarketData
 
 
-UNIVERSE_PATH = Path(__file__).resolve().parents[1] / "data" / "contracts_list.json"
-
-
-def load_universe(path=UNIVERSE_PATH):
-    with Path(path).open(encoding="utf-8") as file:
-        return json.load(file)
+def load_universe(path=None):
+    return load_generated_universe(path)
 
 
 def available_products():

@@ -10,7 +10,7 @@ from analysis.seac_patterns import available_products, load_universe, scan_trade
 universe = load_universe()
 products = available_products()
 app = Dash(__name__)
-app.title = "CL Hidden Patterns"
+app.title = "CL Patterns"
 scan_lock = Lock()
 scan_state = {"job": 0, "processing": False, "status": "Ready.",
               "figure": {}, "data": [], "columns": []}
