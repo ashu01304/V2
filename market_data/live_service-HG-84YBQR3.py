@@ -4,11 +4,23 @@ import json
 import logging
 import math
 import re
+import sys
 import threading
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from market_data.cache import LivePriceCache
+from market_data.config import (
+    CACHE_HOURS, SEAC_UPDATE_HOURS, SPREAD_UPDATE_MINUTES)
+from market_data.queries import MarketData
+from market_data.sync import update as update_database
 
 CONTRACT_URL = "https://insight-x.corp.hertshtengroup.com/api/v1/insight/getPDSInstruments"
 ENDPOINT = "https://ls-md.corp.hertshtengroup.com"
@@ -117,6 +129,15 @@ class PriceStore:
                     for row in self.rows.values()
                     if not products or row["product"] in products]
 
+    def fresh_snapshot(self):
+        with self.lock:
+            now = datetime.now(timezone.utc).timestamp()
+            return [{k: v for k, v in row.items()
+                     if not k.startswith("_") and k != "raw"}
+                    for row in self.rows.values()
+                    if row["value"] is not None
+                    and now - row["_received"] <= self.max_age]
+
     def expression(self, product, expression):
         legs = parse_legs(expression)
         with self.lock:
@@ -138,14 +159,95 @@ class PriceStore:
                         timestamp_basis="oldest_leg_received_at_utc")
 
 
-def make_handler(store):
+class BackgroundWork:
+    def __init__(self, store):
+        self.store = store
+        self.cache = LivePriceCache()
+        self.stop = threading.Event()
+        self.database_lock = threading.Lock()
+        self.last_spread_update = None
+        self.last_seac_update = None
+        self.sync_error = None
+        self.threads = []
+
+    def start(self):
+        self.threads = [
+            threading.Thread(target=self.sample_loop, daemon=True),
+            threading.Thread(target=self.sync_loop, daemon=True),
+        ]
+        for thread in self.threads:
+            thread.start()
+
+    def sample_loop(self):
+        while not self.stop.is_set():
+            try:
+                count = self.cache.save_snapshot(self.store.fresh_snapshot())
+                if count:
+                    logging.info("Cached %d live prices for the current minute", count)
+            except Exception:
+                logging.exception("Could not save live minute cache")
+            now = datetime.now(timezone.utc)
+            self.stop.wait(max(1, 60 - now.second - now.microsecond / 1_000_000))
+
+    def sync_loop(self):
+        next_spread = next_seac = 0.0
+        while not self.stop.is_set():
+            now = time.monotonic()
+            if now >= next_spread:
+                include_seac = now >= next_seac
+                try:
+                    with self.database_lock:
+                        update_database(include_settlements=include_seac)
+                    stamp = datetime.now(timezone.utc).isoformat()
+                    self.last_spread_update = stamp
+                    if include_seac:
+                        self.last_seac_update = stamp
+                        next_seac = time.monotonic() + SEAC_UPDATE_HOURS * 3600
+                    next_spread = time.monotonic() + SPREAD_UPDATE_MINUTES * 60
+                    self.sync_error = None
+                except Exception as error:
+                    self.sync_error = str(error)
+                    logging.exception("Historical update failed; retrying in one minute")
+                    next_spread = time.monotonic() + 60
+            self.stop.wait(5)
+
+    def health(self):
+        return dict(cache_hours=CACHE_HOURS,
+                    spread_update_minutes=SPREAD_UPDATE_MINUTES,
+                    seac_update_hours=SEAC_UPDATE_HOURS,
+                    last_spread_update=self.last_spread_update,
+                    last_seac_update=self.last_seac_update,
+                    sync_error=self.sync_error)
+
+    def close(self):
+        self.stop.set()
+        for thread in self.threads:
+            thread.join(timeout=10)
+        self.cache.close()
+
+
+def records(frame):
+    result = []
+    for timestamp, price in frame[["timestamp", "price"]].itertuples(index=False):
+        result.append({"timestamp": timestamp.isoformat(), "price": float(price)})
+    return result
+
+
+def settlement_records(frame):
+    return [{"trading_date": str(trading_date), "price": float(price)}
+            for trading_date, price in
+            frame[["trading_date", "price"]].itertuples(index=False)
+            if price is not None and math.isfinite(float(price))]
+
+
+def make_handler(store, background):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
             try:
                 if parsed.path == "/health":
-                    result = store.health()
+                    result = {**store.health(), **background.health()}
                 elif parsed.path == "/snapshot":
                     result = store.snapshot(
                         [product_name(p) for p in query.get("product", [])],
@@ -155,6 +257,34 @@ def make_handler(store):
                     expression = query["contract" if parsed.path == "/latest"
                                        else "expression"][0]
                     result = store.expression(product, expression)
+                elif parsed.path == "/history":
+                    frame = background.cache.history(
+                        product_name(query["product"][0]), query["contract"][0],
+                        query.get("start", [None])[0], query.get("end", [None])[0])
+                    result = records(frame)
+                elif parsed.path == "/expression/history":
+                    product = product_name(query["product"][0])
+                    expression = query["expression"][0]
+                    start = query.get("start", [None])[0]
+                    end = query.get("end", [None])[0]
+                    with background.database_lock:
+                        data = MarketData()
+                        try:
+                            frame = data.synthetic(
+                                "LCO" if product == "CO" else product,
+                                expression, start, end)
+                        finally:
+                            data.close()
+                    result = records(frame)
+                elif parsed.path == "/settlement/history":
+                    product = product_name(query["product"][0])
+                    with background.database_lock:
+                        data = MarketData()
+                        try:
+                            frame = data.settlement(product, query["contract"][0])
+                        finally:
+                            data.close()
+                    result = settlement_records(frame)
                 else:
                     self.send_json(404, {"error": "Endpoint not implemented"})
                     return
@@ -229,10 +359,13 @@ def main():
     subscription.setRequestedSnapshot("yes")
     subscription.setRequestedMaxFrequency("1")
     subscription.addListener(PriceListener())
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(store))
+    background = BackgroundWork(store)
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", args.port), make_handler(store, background))
     try:
         client.subscribe(subscription)
         client.connect()
+        background.start()
         logging.info("Serving %d instruments at http://127.0.0.1:%s; Ctrl+C to stop",
                      len(instruments), args.port)
         server.serve_forever()
@@ -240,6 +373,7 @@ def main():
         logging.info("Stopping live service")
     finally:
         server.server_close()
+        background.close()
         client.disconnect()
 
 

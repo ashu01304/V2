@@ -37,14 +37,21 @@ class LiveMarketDataClient:
     def latest(self, product, contract):
         return self._get("/latest", product=product, contract=contract)
 
-    def history(self, product, contract):
-        return self._get("/history", product=product, contract=contract)
+    def history(self, product, contract, start=None, end=None):
+        return self._get("/history", product=product, contract=contract,
+                         **{key: value for key, value in
+                            (("start", start), ("end", end)) if value is not None})
 
     def expression(self, product, expression):
         return self._get("/expression/latest", product=product, expression=expression)
 
-    def expression_history(self, product, expression):
-        return self._get("/expression/history", product=product, expression=expression)
+    def expression_history(self, product, expression, start=None, end=None):
+        return self._get("/expression/history", product=product, expression=expression,
+                         **{key: value for key, value in
+                            (("start", start), ("end", end)) if value is not None})
+
+    def settlement_history(self, product, contract):
+        return self._get("/settlement/history", product=product, contract=contract)
 
     def close(self):
         self.session.close()

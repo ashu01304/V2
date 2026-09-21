@@ -1,0 +1,32 @@
+.minute-pattern-page {
+    width: 98vw;
+    min-height: 100vh;
+    margin: auto;
+    padding: 16px;
+    color: #f8fafc;
+    background: #0b1220;
+}
+
+.minute-controls {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr 1fr 1.5fr;
+    gap: 8px;
+}
+
+.minute-controls label span {
+    display: block;
+    margin-bottom: 4px;
+}
+
+.minute-controls input,
+.minute-controls .Select-control,
+.minute-controls .Select-value-label,
+.minute-controls .Select-menu-outer {
+    width: 100%;
+    color: #111827 !important;
+    background: white !important;
+}
+
+#minute-status {
+    padding: 12px 0;
+}

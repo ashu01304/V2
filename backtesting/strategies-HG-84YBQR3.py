@@ -1,0 +1,182 @@
+# These are the parameters available to you within the strategy_func(hist_stats, live_data) in strategies.py.
+
+# 1. Seasonal Directional Stats (UpRate)
+# UpRate_5Y_[Interval]D: Percentage of the last 5 years where price was higher after [Interval] days.
+# UpRate_10Y_[Interval]D: Percentage of the last 10 years (min 6) where price was higher after [Interval] days.
+# UpRate_15Y_[Interval]D: Percentage of all available years (min 11) where price was higher after [Interval] days.
+# Note: [Interval] can be 3, 6, 10, 15, or 21.
+
+# 2. Seasonal Expectancy Stats (Expected Move)
+# Expected_5Y_[Interval]D: Average price change over [Interval] days across the last 5 historical years.
+# Expected_10Y_[Interval]D: Average price change over [Interval] days across the last 10 historical years.
+# Expected_15Y_[Interval]D: Average price change over [Interval] days across all historical years.
+
+# 3. Seasonal Risk Stats (Max Drawdown)
+# MaxDrawdown_5Y_[Interval]D: Average of the worst price drops seen within [Interval] days across the last 5 years.
+# MaxDrawdown_10Y_[Interval]D: Average of the worst price drops seen within [Interval] days across the last 10 years.
+# MaxDrawdown_15Y_[Interval]D: Average of the worst price drops seen within [Interval] days across all years.
+
+# 4. Clean Seasonal Paths (Filtered Averages)
+# Avg_5Y_Clean: The mean price of the last 5 years after removing the most anomalous year (by volatility).
+# Avg_10Y_Clean: The mean price of the last 10 years after removing the 2 most anomalous years.
+# Avg_15Y_Clean: The mean price of all available years after removing the 3 most anomalous years.
+
+# 5. Global Seasonal Benchmarks
+# STAT_Average: The global average price for this "Day to Expiry" across all historical years.
+# STAT_Std_Dev: The standard deviation (spread) of prices across all historical years for this day.
+# STAT_Rolling_2S: The 2nd standard deviation of the average path's 30-day volatility.
+# Current_Rank: The historical rank of the price at this "Day to Expiry" (1 = highest price in history).
+
+# 6. Live Test-Year Data (live_data Series)
+# live_data.iloc[-1]: The actual current market price on the day being evaluated.
+# live_data.tail(N).mean(): The rolling average price of the current contract over the last N days.
+# live_data.tail(N).std(): The rolling volatility (Standard Deviation) of the current contract over the last N days.
+# len(live_data): The number of days the current contract has been trading so far.
+# live_data.max() / live_data.min(): The life-to-date high or low of the current contract.
+
+import pandas as pd
+import numpy as np
+
+
+class SeasonalStrategies:
+
+    @staticmethod
+    def current_year_mean_reversion(hist_stats, live_trailing, holding_days=10,
+                                    stop_before_expiry=20, entry_zscore=2.0,
+                                    max_efficiency=0.35,
+                                    minimum_expected_move=0.0):
+        if hist_stats.get("DAYS_TO_EXPIRY", 0) < stop_before_expiry:
+            return "NONE", 0
+        live = live_trailing.dropna()
+        if len(live) < 25:
+            return "NONE", 0
+        mean, previous_mean = live.tail(20).mean(), live.iloc[-25:-5].mean()
+        std = live.tail(20).std()
+        previous_std = live.iloc[-21:-1].std()
+        if not std or pd.isna(std) or not previous_std or pd.isna(previous_std):
+            return "NONE", 0
+        zscore = (live.iloc[-1] - mean) / std
+        previous_zscore = (live.iloc[-2] - live.iloc[-21:-1].mean()) / previous_std
+        efficiency = abs(live.iloc[-1] - live.iloc[-11]) / live.diff().tail(10).abs().sum()
+        mean_distance = abs(live.iloc[-1] - mean)
+        flat_mean = abs(mean - previous_mean) / std <= 0.25
+        if (pd.isna(efficiency) or efficiency > max_efficiency or not flat_mean
+                or mean_distance <= minimum_expected_move):
+            return "NONE", 0
+        if previous_zscore <= -entry_zscore and zscore > -entry_zscore:
+            return "LONG", holding_days
+        if previous_zscore >= entry_zscore and zscore < entry_zscore:
+            return "SHORT", holding_days
+        return "NONE", 0
+
+    @staticmethod
+    def current_year_momentum(hist_stats, live_trailing, holding_days=10,
+                              stop_before_expiry=20,
+                              minimum_expected_move=0.0):
+        if hist_stats.get("DAYS_TO_EXPIRY", 0) < stop_before_expiry:
+            return "NONE", 0
+        live = live_trailing.dropna()
+        if len(live) < 25:
+            return "NONE", 0
+        fast = live.tail(5).mean()
+        slow = live.tail(20).mean()
+        previous_slow = live.iloc[-25:-5].mean()
+        changes = live.diff().tail(10)
+        ten_day_move = live.iloc[-1] - live.iloc[-11]
+        std = live.tail(20).std()
+        zscore = (live.iloc[-1] - slow) / std if pd.notna(std) and std else np.nan
+        if pd.isna(zscore) or abs(ten_day_move) <= minimum_expected_move:
+            return "NONE", 0
+        long_entry = (fast > slow and slow > previous_slow and ten_day_move > 0
+                      and (changes > 0).sum() >= 6 and 0 <= zscore <= 2.5
+                      and live.iloc[-2] <= fast and live.iloc[-1] > live.iloc[-2])
+        short_entry = (fast < slow and slow < previous_slow and ten_day_move < 0
+                       and (changes < 0).sum() >= 6 and -2.5 <= zscore <= 0
+                       and live.iloc[-2] >= fast and live.iloc[-1] < live.iloc[-2])
+        return (("LONG", holding_days) if long_entry else
+                ("SHORT", holding_days) if short_entry else ("NONE", 0))
+
+    @staticmethod
+    def strict_research(hist_stats, live_trailing, holding_days=10,
+                        long_rate=0.7, short_rate=0.3,
+                        stop_before_expiry=20, seasonality_bracket="10Y",
+                        minimum_expected_move=0.0, entry_zscore=1.6):
+        if hist_stats.get("DAYS_TO_EXPIRY", 0) < stop_before_expiry:
+            return "NONE", 0
+        up_rate = hist_stats.get(f"UpRate_{seasonality_bracket}_{holding_days}D", np.nan)
+        expected = hist_stats.get(f"Expected_{seasonality_bracket}_{holding_days}D", np.nan)
+        zscore = hist_stats.get("TECH_ZScore", np.nan)
+        if (pd.isna(up_rate) or pd.isna(expected) or pd.isna(zscore)
+                or len(live_trailing) < 20 or
+                abs(expected) <= minimum_expected_move):
+            return "NONE", 0
+        if up_rate >= long_rate and expected > 0 and zscore <= -entry_zscore:
+            return "LONG", holding_days
+        if up_rate <= short_rate and expected < 0 and zscore >= entry_zscore:
+            return "SHORT", holding_days
+        return "NONE", 0
+
+    @staticmethod
+    def technical_zscore_rsi(hist_stats, live_trailing, holding_days=5,
+                             z_score_threshold=1.85, upper_rsi=65,
+                             lower_rsi=35, stop_before_expiry=63):
+        """Trade live Z-score extremes confirmed by the existing RSI definition."""
+        z_score = hist_stats.get('TECH_ZScore', np.nan)
+        rsi = hist_stats.get('TECH_RSI', np.nan)
+        days_to_expiry = hist_stats.get('DAYS_TO_EXPIRY', np.nan)
+        if pd.isna(z_score) or pd.isna(rsi) or pd.isna(days_to_expiry):
+            return "NONE", 0
+
+        if days_to_expiry < stop_before_expiry:
+            return "NONE", 0
+
+        if z_score <= -z_score_threshold and rsi <= lower_rsi:
+            return "LONG", holding_days
+        elif z_score >= z_score_threshold and rsi >= upper_rsi:
+            return "SHORT", holding_days
+        return "NONE", 0
+
+    @staticmethod
+    def ashu01(hist_stats, live_trailing):
+        year_SD = live_trailing.tail(10).std()
+        year_MEAN = live_trailing.tail(21).mean()
+        curr_price = live_trailing.iloc[-1]
+
+        if hist_stats.get('UpRate_5Y_3D',0.5) >= 0.8 and hist_stats.get('UpRate_10Y_3D',0.5) >= 0.7 and hist_stats.get('UpRate_5Y_6D',0.5) >= 0.6 and hist_stats.get('UpRate_10Y_6D',0.5) > 0.7 and curr_price <= hist_stats.get('Avg_5Y_Clean', curr_price) and curr_price <= year_MEAN - 0.5*year_SD:
+            return "LONG", 6
+        
+        elif hist_stats.get('UpRate_5Y_3D',0.5) <= 0.2 and hist_stats.get('UpRate_10Y_3D',0.5) <= 0.3 and hist_stats.get('UpRate_5Y_6D',0.5) <= 0.4 and hist_stats.get('UpRate_10Y_6D',0.5) < 0.3 and curr_price >= hist_stats.get('Avg_5Y_Clean', curr_price) and curr_price >= year_MEAN + 0.5*year_SD  :
+            return "SHORT", 6
+        else:
+            return "NONE", 0
+
+    @staticmethod
+    def CO_Defly01(hist_stats, live_trailing): # its working fine on far months defly 
+        days = 6
+        if len(live_trailing) < 2:
+            return "NONE", 0
+
+        curr_price = live_trailing.iloc[-1]
+        last_day_price = live_trailing.iloc[-2]
+        year_SD = live_trailing.tail(21).std()
+        year_MEAN = live_trailing.tail(42).mean()
+        seac_avg_5c = hist_stats.get('Avg_5Y_Clean', curr_price)
+        seac_avg_10c = hist_stats.get('Avg_10Y_Clean', curr_price)
+        seac_sd_5 = hist_stats.get('STAT_Std_Dev', 0)
+        up_5_6D  = hist_stats.get('UpRate_5Y_6D',0.5)
+        up_5_10D = hist_stats.get('UpRate_5Y_10D',0.5)
+        up_5_15D = hist_stats.get('UpRate_5Y_15D',0.5)
+        up_5_20D = hist_stats.get('UpRate_5Y_20D',0.5)
+        up_10_6D  = hist_stats.get('UpRate_10Y_6D',0.5)
+        up_10_10D = hist_stats.get('UpRate_10Y_10D',0.5)
+        up_10_15D = hist_stats.get('UpRate_10Y_15D',0.5)
+        up_10_20D = hist_stats.get('UpRate_10Y_20D',0.5)
+
+        if curr_price <= year_MEAN - 1*year_SD and up_5_6D >= 0.6 and up_10_6D >= 0.6 and curr_price >= year_MEAN - 3*year_SD and curr_price <= seac_avg_5c : 
+            return "LONG", days
+
+        elif curr_price >= year_MEAN + 1*year_SD and up_5_6D <= 0.4 and up_10_6D <= 0.4 and curr_price <= year_MEAN + 3*year_SD and curr_price >= seac_avg_5c: 
+            return "SHORT", days
+
+        else:
+            return "NONE", 0

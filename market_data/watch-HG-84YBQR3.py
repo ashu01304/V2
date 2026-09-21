@@ -41,7 +41,7 @@ def acquire_lock():
     return lock
 
 
-def main():
+def legacy_main():
     configure_logging()
     lock = acquire_lock()
     if lock is None:
@@ -71,6 +71,12 @@ def main():
             time.sleep(max(0, UPDATE_INTERVAL_SECONDS - elapsed))
     finally:
         lock.close()
+
+
+def main():
+    """Keep the old command compatible while using the single unified service."""
+    from market_data.live_service import main as unified_main
+    return unified_main()
 
 
 if __name__ == "__main__":
