@@ -1,8 +1,6 @@
-import json
 import os
 import re
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -11,10 +9,10 @@ from scipy.signal import find_peaks
 from sklearn.cluster import HDBSCAN
 
 from analysis.seac_patterns import _ensemble_prediction
+from analysis.contract_universe import load_universe
 from market_data import MarketData
 
 
-UNIVERSE_PATH = Path(__file__).resolve().parents[1] / "data" / "contracts_list.json"
 PRODUCT_PATTERN = re.compile(r"^([A-Z]+)[FGHJKMNQUVXZ]\d{1,2}-")
 
 
@@ -34,8 +32,7 @@ def available_minute_products():
 
 def scan_minute_suggestions(product="CL", interval="30min", history_days=150,
                             horizon_bars=6, workers=None, progress=None):
-    with UNIVERSE_PATH.open(encoding="utf-8") as file:
-        universe = json.load(file)
+    universe = load_universe()
     contracts = list(universe["contracts"].items())
     worker_count = workers or min(8, os.cpu_count() or 1)
     suggestions = []

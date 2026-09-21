@@ -1,5 +1,7 @@
 import plotly.graph_objects as go
 
+from analysis.expression import parse_expression
+
 
 class OHLCPlotter:
     def plot(self, data, chart_type="candlestick", title=None, height=800,
@@ -74,6 +76,21 @@ class OHLCPlotter:
         return fig
 
 class SeasonalityPlotter:
+    @staticmethod
+    def _add_live_marker(fig, data):
+        if "is_live" not in data:
+            return
+        live = data[data["is_live"]]
+        if live.empty:
+            return
+        fig.add_trace(go.Scatter(
+            x=[live.index[-1]], y=[live["value"].iloc[-1]], mode="markers",
+            marker=dict(size=7, color="#22c55e",
+                        line=dict(color="white", width=1)),
+            name="Live price",
+            hovertemplate="Live price<br>Value: %{y}<extra></extra>",
+        ))
+
     def plot(self, data_dict, title="Seasonality"):
         fig = go.Figure()
         colors = ['#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A', '#19D3F3']
@@ -103,7 +120,7 @@ class SeasonalityPlotter:
             return
         fig.show()
 
-    def build_seasonality_figure(self, result, title="Seasonality"):
+    def build_seasonality_figure(self, result, title="Seasonality", height=800):
         for warning in result.get('warnings', []):
             print(f"⚠️ {warning}")
 
@@ -156,6 +173,8 @@ class SeasonalityPlotter:
                     if customdata is not None
                     else f"{year}<br>Value: %{{y}}<extra></extra>")
             ))
+            if is_current:
+                self._add_live_marker(fig, df)
             if not is_current: color_i += 1
 
         if average is not None and not average.empty:
@@ -173,11 +192,15 @@ class SeasonalityPlotter:
                        tickmode="auto", nticks=6, gridcolor='#333'),
             yaxis=dict(title="Value", gridcolor='#333'),
             hovermode="x unified",
-            height=800,
+            uirevision=f"seasonality:{title}",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                        xanchor="left", x=0),
+            margin=dict(l=55, r=20, t=95, b=50),
+            height=height,
         )
         return fig
 
-    def build_rollover_figure(self, result, title="Strategy Rollover"):
+    def build_rollover_figure(self, result, title="Strategy Rollover", height=800):
         fig = go.Figure()
         colors = ['#636EFA', '#EF553B', '#00CC96', '#AB63FA', '#FFA15A', '#19D3F3']
         current_expiry_days = []
@@ -187,7 +210,7 @@ class SeasonalityPlotter:
             current_expiry_days.append(item["current_expiry_day"])
             fig.add_trace(go.Scatter(
                 x=data.index, y=data["value"], mode="lines",
-                name=str(contract),
+                name=parse_expression(contract)[0][1],
                 line=dict(width=3 if active else 1.5,
                           color="white" if active else colors[index % len(colors)]),
                 customdata=list(zip(data["date"].dt.strftime("%Y-%m-%d"), data["side"])),
@@ -196,12 +219,7 @@ class SeasonalityPlotter:
                                "<br>Change: %{y}<extra></extra>"),
             ))
             if active:
-                latest = data.iloc[-1]
-                fig.add_trace(go.Scatter(
-                    x=[data.index[-1]], y=[latest["value"]], mode="markers",
-                    marker=dict(size=8, color="white"), name="Latest available",
-                    showlegend=False, hoverinfo="skip",
-                ))
+                self._add_live_marker(fig, data)
         fig.add_vline(x=0, line_color="#94a3b8", annotation_text="Previous expiry")
         if current_expiry_days:
             fig.add_vline(x=max(current_expiry_days), line_color="#94a3b8",
@@ -212,6 +230,57 @@ class SeasonalityPlotter:
             title=title, xaxis=dict(title="Previous strategy ← rollover → Next strategy",
                                    gridcolor="#333"),
             yaxis=dict(title="Change from rollover", gridcolor="#333"),
-            hovermode="x unified", height=800,
+            hovermode="x unified", uirevision=f"rollover:{title}",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                        xanchor="left", x=0),
+            margin=dict(l=55, r=20, t=100, b=55), height=height,
+        )
+        return fig
+
+    def build_forward_curve_figure(self, result, symbol, expression, height=400):
+        fig = go.Figure()
+        points = result.get("live", [])
+        labels = [point["label"] for point in points]
+        selected = parse_expression(expression)[0][1]
+        history_colors = ["rgba(148,163,184,0.70)", "rgba(203,213,225,0.35)"]
+        for settlement, color in reversed(list(zip(
+                result.get("settlements", []), history_colors))):
+            history = settlement["points"]
+            fig.add_trace(go.Scatter(
+                x=[point["label"] for point in history],
+                y=[point["price"] for point in history],
+                mode="lines+markers", name=settlement["date"],
+                line=dict(color=color, width=1.5), marker=dict(color=color, size=4),
+                customdata=[point["contract"] for point in history],
+                hovertemplate="%{customdata}<br>Settlement: %{y}<extra></extra>",
+            ))
+        if points:
+            fig.add_trace(go.Scatter(
+                x=labels,
+                y=[point["price"] for point in points],
+                mode="lines+markers", name="Live",
+                line=dict(color="#38bdf8", width=2),
+                marker=dict(
+                    color=["#22c55e" if point["label"] == selected else "white"
+                           for point in points],
+                    size=[9 if point["label"] == selected else 6 for point in points],
+                    line=dict(color="#0f172a", width=1),
+                ),
+                customdata=[point["contract"] for point in points],
+                hovertemplate="%{customdata}<br>Price: %{y}<extra></extra>",
+            ))
+        else:
+            fig.add_annotation(text="Forward prices unavailable", showarrow=False)
+        fig.update_layout(
+            template="plotly_dark", paper_bgcolor="black", plot_bgcolor="black",
+            title=f"{symbol} {expression} Forward Curve",
+            xaxis=dict(title="Shifted expression", gridcolor="#333",
+                       type="category", categoryorder="array", categoryarray=labels,
+                       tickmode="array", tickvals=labels[::2], tickangle=-35),
+            yaxis=dict(title="Price", gridcolor="#333"), hovermode="x unified",
+            uirevision=f"forward-curve:{symbol}:{expression}",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                        xanchor="left", x=0),
+            margin=dict(l=55, r=20, t=95, b=75), height=height,
         )
         return fig

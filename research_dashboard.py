@@ -1,8 +1,6 @@
-import json
 from pathlib import Path
-import webbrowser
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from threading import Lock, Thread, Timer
+from threading import Lock, Thread
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -15,12 +13,9 @@ from backtesting.sl_tp_strategies import SLTPStrategies
 from backtesting.reporting import write_walk_forward_report
 from backtesting.parallel_worker import run_expression_batch
 from market_data import MarketData
+from analysis.contract_universe import load_universe
 
-
-with (Path(__file__).resolve().parent / "data" / "contracts_list.json").open(
-    encoding="utf-8"
-) as file:
-    universe = json.load(file)
+universe = load_universe()
 
 db = MarketData()
 try:
@@ -298,6 +293,7 @@ def _backtest_results(all_trades, status):
 
 
 app = Dash(__name__)
+app.title = "Strategy Research"
 app.layout = html.Div([
     html.H2("Automatic Trade Idea Scanner"),
     html.Div([
@@ -446,5 +442,4 @@ def run_walk_forward(_, __, symbol, analysis_years, selected_strategies,
 
 
 if __name__ == "__main__":
-    Timer(1, lambda: webbrowser.open("http://127.0.0.1:8051")).start()
     app.run(host="127.0.0.1", port=8051, debug=False, threaded=True)

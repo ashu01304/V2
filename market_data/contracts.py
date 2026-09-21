@@ -10,6 +10,13 @@ TERM = re.compile(
 )
 
 
+def _stored_contract_code(product, contract):
+    """Convert contract codes to the format used by a product's spread data."""
+    if product == "LCO":
+        return f"{contract[0]}{contract[-1]}"
+    return contract
+
+
 def parse(expression):
     expression = expression.replace(" ", "")
     legs = []
@@ -41,7 +48,8 @@ def spread_recipe(product, expression):
         cumulative += legs[index][0]
         if abs(cumulative) <= 1e-10:
             continue
-        first, second = legs[index][1], legs[index + 1][1]
+        first = _stored_contract_code(product, legs[index][1])
+        second = _stored_contract_code(product, legs[index + 1][1])
         recipe.append((cumulative, f"{product}{first}-{second}"))
     return recipe
 
