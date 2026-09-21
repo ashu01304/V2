@@ -1,0 +1,60 @@
+# Python environments and build outputs
+venv/
+.venv/
+env/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# Python caches and compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.ipynb_checkpoints/
+.pytest_cache/
+
+# Local editor settings
+.vscode/
+*.code-workspace
+
+# Secrets and local environment configuration
+.env
+.env.*
+!.env.example
+!.env.sample
+/data/tokens.json
+
+# Databases, journals, and temporary database copies (any directory)
+*.db
+*.db-*
+*.db.*
+*.sqlite
+*.sqlite-*
+*.sqlite.*
+*.sqlite3
+*.sqlite3-*
+*.sqlite3.*
+*.duckdb
+*.duckdb-*
+*.duckdb.*
+
+# Local datasets, generated data, logs, and sync files
+/data/
+
+# Generated reports and local analysis outputs
+MASTER_BUTTERFLY_CHECK.xlsx
+seasonality_analysis.xlsx
+seasonality_report_final.xlsx
+Walk_Forward_Results.xlsx
+combinations_with_codes.xlsx
+Strategy_Comparison_Results.xlsx
+Yearly_Strategy_Results.xlsx
+combinations.json
+/backtest_reports/seac_model_backtest_CL_20260824_144833.xlsx
+
+# Existing local-only tools
+/Mini_Tools/expression_creator.py
+/Mini_Tools/raw_expression.py
+/Mini_Tools/expression_true.py
