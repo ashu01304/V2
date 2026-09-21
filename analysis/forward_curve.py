@@ -56,22 +56,47 @@ class ForwardCurve:
                 points.append({"contract": self._format(shifted),
                                "label": shifted[0][1],
                                "price": round(value, 2)
-                               if symbol in {"CL", "CO"} else value,
+                               if symbol in {"CL", "CO", "CL-CO"} else value,
                                "order": anchor})
             return points
 
-        live = build(self._prices(self.live.snapshot([symbol], raw=True)))
+        if symbol == "CL-CO":
+            snapshot = self.live.snapshot(["CL", "CO"], raw=True)
+            live_prices = {(row.get("product"), row.get("contract")): row.get("price")
+                           for row in snapshot if row.get("price") is not None}
+            live_rows = [
+                {"contract": contract,
+                 "price": float(price) - float(live_prices[("CO", contract)])}
+                for (product, contract), price in live_prices.items()
+                if product == "CL" and ("CO", contract) in live_prices
+            ]
+        else:
+            live_rows = self.live.snapshot([symbol], raw=True)
+        live = build(self._prices(live_rows))
         anchors = {point["order"] for point in live}
+        query_symbol = "CL" if symbol == "CL-CO" else symbol
         dates = [row[0] for row in self.db.connection.execute("""
             SELECT DISTINCT trading_date FROM seac_settlements
             WHERE symbol=? ORDER BY trading_date DESC LIMIT 2
-        """, [symbol]).fetchall()]
+        """, [query_symbol]).fetchall()]
         settlements = []
         for date in dates:
-            frame = self.db.connection.execute("""
-                SELECT contract_code, price FROM seac_settlements
-                WHERE symbol=? AND trading_date=? AND price IS NOT NULL
-            """, [symbol, date]).fetchdf()
+            if symbol == "CL-CO":
+                frame = self.db.connection.execute("""
+                    SELECT cl.contract_code, cl.price - co.price AS price
+                    FROM seac_settlements cl
+                    JOIN seac_settlements co
+                      ON co.trading_date=cl.trading_date
+                     AND co.contract_code=cl.contract_code
+                    WHERE cl.symbol='CL' AND co.symbol='CO'
+                      AND cl.trading_date=?
+                      AND cl.price IS NOT NULL AND co.price IS NOT NULL
+                """, [date]).fetchdf()
+            else:
+                frame = self.db.connection.execute("""
+                    SELECT contract_code, price FROM seac_settlements
+                    WHERE symbol=? AND trading_date=? AND price IS NOT NULL
+                """, [symbol, date]).fetchdf()
             rows = [{"contract_code": row.contract_code, "price": row.price}
                     for row in frame.itertuples(index=False)]
             settlements.append({"date": str(date),

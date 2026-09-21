@@ -200,6 +200,8 @@ product_db = MarketData()
 try:
     product_db.cursor.execute("SELECT DISTINCT symbol FROM seac_settlements ORDER BY symbol")
     products = [row[0] for row in product_db.cursor.fetchall()]
+    if "CL" in products and "CO" in products and "CL-CO" not in products:
+        products.append("CL-CO")
 finally:
     product_db.close()
 

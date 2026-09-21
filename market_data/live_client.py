@@ -27,19 +27,31 @@ class LiveMarketDataClient:
             self.base_url + "/snapshot", params=parameters, timeout=self.timeout
         )
         response.raise_for_status()
-        return response.json()
+        rows = response.json()
+        # Forward curves consume price; the live bridge calls it value.
+        for row in rows:
+            if row.get("price") is None:
+                row["price"] = row.get("value")
+        return rows
 
     def latest(self, product, contract):
         return self._get("/latest", product=product, contract=contract)
 
-    def history(self, product, contract):
-        return self._get("/history", product=product, contract=contract)
+    def history(self, product, contract, start=None, end=None):
+        return self._get("/history", product=product, contract=contract,
+                         **{key: value for key, value in
+                            (("start", start), ("end", end)) if value is not None})
 
     def expression(self, product, expression):
         return self._get("/expression/latest", product=product, expression=expression)
 
-    def expression_history(self, product, expression):
-        return self._get("/expression/history", product=product, expression=expression)
+    def expression_history(self, product, expression, start=None, end=None):
+        return self._get("/expression/history", product=product, expression=expression,
+                         **{key: value for key, value in
+                            (("start", start), ("end", end)) if value is not None})
+
+    def settlement_history(self, product, contract):
+        return self._get("/settlement/history", product=product, contract=contract)
 
     def close(self):
         self.session.close()

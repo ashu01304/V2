@@ -82,6 +82,8 @@ def hourly_figure(symbol, expression, plans, live_price):
             "case": plans["shortlist_case"], "trades": plans["selected_trades"],
             "wins": plans["selected_win_rate"] * plans["selected_trades"],
         }).dropna()
+        if source.empty:
+            continue
         grouped = source.groupby(["entry", "tp", "sl"], as_index=False).agg(
             supporting_cases=("case", "count"), trades=("trades", "sum"),
             wins=("wins", "sum"), cases=("case", lambda x: ", ".join(map(str, x))))
@@ -109,7 +111,7 @@ def hourly_figure(symbol, expression, plans, live_price):
             text=[f"Live {live_price:.{decimals}f}"], textposition="top right",
             marker={"color": "#34d399", "size": 8, "line": {"color": "white", "width": 1}}))
     figure.update_layout(
-        title=f"{symbol} {expression} | hourly price with strongest LONG and SHORT plans",
+        title=f"{symbol} {expression} | hourly price",
         xaxis_title="Time", yaxis_title="Expression price", height=675,
         xaxis_rangeslider_visible=False, uirevision=f"hourly-trigger:{symbol}:{expression}",
         legend={"orientation": "h", "y": 1.02, "x": 0},
@@ -243,10 +245,6 @@ def create_app(data):
             rows["lower_bound"].notna() &
             rows["trigger_allowed"].fillna(False).astype(bool)
         ].copy()
-        if ready.empty:
-            empty = go.Figure().update_layout(**COLORS)
-            return ("No currently eligible levels match these filters or their "
-                    "configured trading-day windows.", empty, [], [], [], [])
         try:
             current = live.expression(symbol, expression)
             live_price = float(current["value"])
@@ -254,9 +252,15 @@ def create_app(data):
         except Exception as error:
             live_price = None
             live_text = f"Live price unavailable: {error}"
+        level_date = (expression_rows["latest_date"].max()
+                      if not expression_rows.empty else "unavailable")
+        eligibility_text = (
+            " | No eligible trigger levels match these filters or the report's "
+            "trading-day windows. Showing price history without trigger lines."
+            if ready.empty else "")
         status = html.Div([
             html.B(f"{expression}"), html.Span(
-                f" | Level data: {ready['latest_date'].iloc[0]} | {live_text}")])
+                f" | Level data: {level_date} | {live_text}{eligibility_text}")])
 
         def plan_figure(direction):
             long = direction == "LONG"

@@ -11,7 +11,7 @@ from market_data.config import DATA_DIR
 from market_data.sync import update
 
 
-UPDATE_INTERVAL_SECONDS = 60 * 60
+UPDATE_INTERVAL_SECONDS = 15 * 60
 LOG_PATH = DATA_DIR / "market_data_sync.log"
 LOCK_PATH = DATA_DIR / "market_data_sync.lock"
 
@@ -41,11 +41,11 @@ def acquire_lock():
     return lock
 
 
-def main():
+def legacy_main():
     configure_logging()
     lock = acquire_lock()
     if lock is None:
-        message = "Hourly updater is already running; new process stopped."
+        message = "15-minute updater is already running; new process stopped."
         print(message, flush=True)
         logging.warning(message)
         return
@@ -71,6 +71,12 @@ def main():
             time.sleep(max(0, UPDATE_INTERVAL_SECONDS - elapsed))
     finally:
         lock.close()
+
+
+def main():
+    """Keep the old command compatible while using the single unified service."""
+    from market_data.live_service import main as unified_main
+    return unified_main()
 
 
 if __name__ == "__main__":

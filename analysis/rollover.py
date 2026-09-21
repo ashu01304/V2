@@ -14,8 +14,9 @@ class StrategyRollover:
 
     def calculate(self, symbol, expression, periods=6):
         series, warnings = {}, []
+        query_symbol = "CL" if symbol == "CL-CO" else symbol
         self.db.cursor.execute(
-            "SELECT MAX(trading_date) FROM seac_settlements WHERE symbol = ?", (symbol,)
+            "SELECT MAX(trading_date) FROM seac_settlements WHERE symbol = ?", (query_symbol,)
         )
         latest_market_date = pd.Timestamp(self.db.cursor.fetchone()[0]).normalize()
         self.latest_market_date = latest_market_date
@@ -82,8 +83,10 @@ class StrategyRollover:
         return {"series": series, "warnings": warnings}
 
     def _contract_sequence(self, symbol):
+        query_symbol = "CL" if symbol == "CL-CO" else symbol
         self.db.cursor.execute(
-            "SELECT DISTINCT contract_code FROM seac_settlements WHERE symbol = ?", (symbol,)
+            "SELECT DISTINCT contract_code FROM seac_settlements WHERE symbol = ?",
+            (query_symbol,)
         )
         return sorted(
             (expiry, contract)
@@ -114,6 +117,8 @@ class StrategyRollover:
     def _append_latest_minute_value(self, symbol, expression, values, end_expiry):
         """Append one newest minute value to the active rollover series."""
         if values.empty or not hasattr(self.db, "synthetic"):
+            return values
+        if symbol == "CL-CO":
             return values
         try:
             current = self.live.expression(symbol, expression)
@@ -151,7 +156,9 @@ class StrategyRollover:
     def _official_expiry(self, symbol, contract):
         if not contract:
             return None
-        official = self.official_expiry.get(symbol, contract)
+        official = self.official_expiry.get(
+            "CL" if symbol == "CL-CO" else symbol, contract
+        )
         if official is not None:
             return pd.Timestamp(official).normalize()
         if 2000 + int(contract[1:]) > self.latest_market_date.year:
