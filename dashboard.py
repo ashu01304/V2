@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, State, ctx, dcc, html, dash_table, no_update
 
+from market_data.chart_updates import preserve_live_charts
 from market_data import MarketData
 from analysis.expression import parse_expression
 from analysis.feature_creation import FeatureCreator
@@ -422,9 +423,10 @@ def highlight_cells(slope_threshold, zscore_threshold, selected, _):
     Input("close-modal", "n_clicks"),
     Input("modal-backdrop", "n_clicks"),
     Input("live-chart-refresh", "n_intervals"),
-    State("selected-cell", "data"),
+    State("selected-cell", "data"), State('seasonality-chart', "figure"),
     prevent_initial_call=True,
 )
+@preserve_live_charts([0])
 def toggle_chart(cell, _, __, ___, selected_cell):
     hidden = {"display": "none"}
     if ctx.triggered_id in {"close-modal", "modal-backdrop"}:
@@ -469,8 +471,9 @@ def toggle_chart(cell, _, __, ___, selected_cell):
 @app.callback(
     Output("rollover-chart", "figure"),
     Input("selected-cell", "data"),
-    Input("live-chart-refresh", "n_intervals"),
+    Input("live-chart-refresh", "n_intervals"), State('rollover-chart', "figure"),
 )
+@preserve_live_charts([0])
 def update_rollover(selection, _):
     if not selection:
         return go.Figure()
@@ -488,8 +491,9 @@ def update_rollover(selection, _):
 @app.callback(
     Output("forward-curve-chart", "figure"),
     Input("selected-cell", "data"),
-    Input("live-chart-refresh", "n_intervals"),
+    Input("live-chart-refresh", "n_intervals"), State('forward-curve-chart', "figure"),
 )
+@preserve_live_charts([0])
 def update_forward_curve(selection, _):
     if not selection:
         return go.Figure()

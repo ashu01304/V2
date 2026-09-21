@@ -8,7 +8,8 @@ from time import monotonic
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, dash_table, dcc, html
+from market_data.chart_updates import preserve_live_charts
+from dash import Dash, Input, Output, State, dash_table, dcc, html
 
 from market_data import LiveMarketDataClient, MarketData
 from product_config import TICK_SIZES
@@ -217,7 +218,8 @@ def create_app(data):
         Input("expression", "value"),
         Input("ranking-method", "value"), Input("trade-threshold", "value"),
         Input("minimum-swing", "value"), Input("live-refresh", "n_intervals"),
-        Input("bucket", "value"), Input("symbol", "value"))
+        Input("bucket", "value"), Input("symbol", "value"), State('hourly-chart', "figure"))
+    @preserve_live_charts([1])
     def update(expression, rankings, thresholds, minimum_swings, _, bucket, symbol):
         expression_rows = data[
             (data["symbol"] == symbol) & (data["bucket"] == bucket)

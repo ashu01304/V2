@@ -5,7 +5,8 @@ from pathlib import Path
 from threading import Lock
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, dash_table, dcc, html
+from market_data.chart_updates import preserve_live_charts
+from dash import Dash, Input, Output, State, dash_table, dcc, html
 from analysis.contract_universe import DEFAULT_EXPIRY_PATH
 from CL_CO_testing.config import DEFAULT_SYMBOL
 from CL_CO_testing.engine import load_intraday_series, ranked_bands, ranked_chart
@@ -197,7 +198,8 @@ def create_app():
         Output("levels", "data"), Output("levels", "columns"),
         Output("levels-title", "children"), Output("status", "children"),
         Output("favicon-state", "data"),
-        Input("timer", "n_intervals"), Input("contracts", "active_cell"))
+        Input("timer", "n_intervals"), Input("contracts", "active_cell"), State('chart', "figure"))
+    @preserve_live_charts([2])
     def update(_, active):
         now, prices = pd.Timestamp.now(tz="UTC"), {}
         settings, expiry_frame, levels, refreshed_at = band_state.get(now)

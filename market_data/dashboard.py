@@ -2,7 +2,8 @@
 
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, Patch, State, ctx, dash_table, dcc, html, no_update
+from market_data.chart_updates import preserve_live_charts
+from dash import Dash, Input, Output, State, dash_table, dcc, html, no_update
 
 from market_data.live_client import LiveMarketDataClient
 
@@ -102,8 +103,10 @@ app.layout = html.Div([
     Output("contract", "value"), Output("snapshot", "data"),
     Output("snapshot", "columns"), Output("forward-curve", "figure"),
     Input("history-timer", "n_intervals"), Input("refresh", "n_clicks"),
-    Input("product", "value"), State("contract", "value"))
+    Input("product", "value"), State("contract", "value"), State('forward-curve', "figure"))
+@preserve_live_charts([5])
 def update_live(_, __, product, selected):
+    previous_selection = selected
     client = LiveMarketDataClient(API_URL)
     try:
         health = client.health()
@@ -146,7 +149,8 @@ def update_live(_, __, product, selected):
     if health.get("sync_error"):
         status.append(html.Span(" | sync error: " + health["sync_error"],
                                 style={"color": "#f87171"}))
-    return status, contracts, selected, table_rows, columns, curve
+    selection_update = no_update if selected == previous_selection else selected
+    return status, contracts, selection_update, table_rows, columns, curve
 
 
 @app.callback(
@@ -155,7 +159,8 @@ def update_live(_, __, product, selected):
     Output("history-status", "children"),
     Input("timer", "n_intervals"), Input("refresh", "n_clicks"),
     Input("product", "value"), Input("contract", "value"),
-    Input("expression", "value"), Input("hours", "value"))
+    Input("expression", "value"), Input("hours", "value"), State('cache-history', "figure"), State('expression-history', "figure"), State('settlement-history', "figure"))
+@preserve_live_charts([0, 1, 2])
 def update_history(_, __, product, contract, expression, hours):
     cache_plot = figure("Three-hour live outright cache", "Price")
     merged_plot = figure("Merged expression history", "Expression value")
@@ -172,36 +177,6 @@ def update_history(_, __, product, contract, expression, hours):
     rolling_start = now - pd.Timedelta(hours=3)
     start = (now - pd.Timedelta(hours=hours)).isoformat()
     client, messages = LiveMarketDataClient(API_URL), []
-
-    if ctx.triggered_id == "history-timer":
-        cache_patch, merged_patch = Patch(), Patch()
-        try:
-            cached = pd.DataFrame(client.history(
-                product, contract, start=rolling_start.isoformat()))
-            if not cached.empty:
-                cached["timestamp"] = pd.to_datetime(cached["timestamp"], utc=True)
-            x, y = with_gaps(cached, "timestamp", "price", gap_minutes=2)
-            cache_patch["data"][0]["x"], cache_patch["data"][0]["y"] = x, y
-            messages.append(f"cache points: {len(cached):,}")
-
-            recent = pd.DataFrame(client.expression_history(
-                product, expression, start=rolling_start.isoformat()))
-            if not recent.empty:
-                recent["timestamp"] = pd.to_datetime(recent["timestamp"], utc=True)
-            x, y = with_gaps(recent, "timestamp", "price")
-            merged_patch["data"][1]["x"], merged_patch["data"][1]["y"] = x, y
-            messages.append(f"latest three-hour points: {len(recent):,}")
-            latest = client.expression(product, expression)
-            merged_patch["data"][2]["x"] = [pd.to_datetime(
-                latest["timestamp"], utc=True)]
-            merged_patch["data"][2]["y"] = [latest["value"]]
-            messages.append(f"live expression: {float(latest['value']):.4f}")
-            return (cache_patch, merged_patch, no_update,
-                    "Automatic update: latest three hours only | " + " | ".join(messages))
-        except Exception as error:
-            return no_update, no_update, no_update, f"Recent update error: {error}"
-        finally:
-            client.close()
 
     try:
         try:

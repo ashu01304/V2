@@ -6,7 +6,7 @@ import pandas as pd
 
 
 def write_walk_forward_report(trades, symbol, configuration):
-    output_dir = Path("backtest_reports")
+    output_dir = Path(__file__).resolve().parents[1] / "backtest_reports"
     output_dir.mkdir(exist_ok=True)
     path = output_dir / f"walk_forward_{symbol}_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
     trades = trades.sort_values(["Expression", "Entry_Date"]).reset_index(drop=True)

@@ -12,7 +12,7 @@ TERM = re.compile(
 
 def _stored_contract_code(product, contract):
     """Convert contract codes to the format used by a product's spread data."""
-    if product == "LCO":
+    if product in {"LCO", "LGO", "DBIP", "MRBN"}:
         return f"{contract[0]}{contract[-1]}"
     return contract
 

@@ -2,7 +2,8 @@
 from pathlib import Path
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, dash_table, dcc, html
+from market_data.chart_updates import preserve_live_charts
+from dash import Dash, Input, Output, State, dash_table, dcc, html
 from analysis.contract_universe import DEFAULT_EXPIRY_PATH
 from CL_CO_testing.config import DEFAULT_SYMBOL
 from CL_CO_testing.engine import load_intraday_series, ranked_chart
@@ -64,7 +65,8 @@ def create_app():
                   Output("contract-chart", "style"),
                   Input("refresh", "n_intervals"),
                   Input("assume", "value"), Input("contracts", "value"),
-                  Input("timeframes", "value"), Input("signals", "active_cell"))
+                  Input("timeframes", "value"), Input("signals", "active_cell"), State('contract-chart', "figure"))
+    @preserve_live_charts([3])
     def refresh(_, assume, selected_contracts, selected_timeframes, active_cell):
         load_intraday_series.cache_clear()
         now, rows, results = pd.Timestamp.now(tz="UTC"), [], {}
