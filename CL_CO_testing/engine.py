@@ -147,9 +147,16 @@ def ranked_bands(candles, lookback, rank):
     return upper, lower
 
 
-def ranked_chart(result, lookback, rank, bands=None):
+def ranked_chart(result, lookback, rank, bands=None, calculate_trades=True):
     lookback, rank = int(lookback), int(rank)
     upper, lower = bands or ranked_bands(result["candles"], lookback, rank)
+    if not calculate_trades:
+        ranked = dict(result)
+        ranked.update(rank_upper=upper, rank_lower=lower,
+                      rank_lookback=lookback, band_rank=rank, trades=[],
+                      total_trades=None, resolved_trades=None, open_trades=None,
+                      wins=None, win_rate=None, total_pnl_ticks=None)
+        return ranked
     trades = fixed_band_trades(
         result["candles"], upper, lower, PRODUCT_CONFIG["CL"]["tick_size"],
         result["tp_ticks"], result["sl_ticks"], result["minimum_trade_gap"],
@@ -185,7 +192,8 @@ def calculate_chart(symbol, contract, strategy, z_score_threshold,
                     z_score_lookback, timeframe_minutes, days_before_expiry,
                     no_trade_days_before_expiry, tp_ticks, sl_ticks,
                     minimum_trade_gap, max_parallel_trades,
-                    max_consecutive_direction, moving_average_lookback):
+                    max_consecutive_direction, moving_average_lookback,
+                    calculate_trades=True):
     """Load intraday candles and calculate trailing candle-based Z-score bands."""
     z_score_threshold = float(z_score_threshold)
     if z_score_threshold <= 0:
@@ -240,7 +248,7 @@ def calculate_chart(symbol, contract, strategy, z_score_threshold,
         candles, upper, lower, config["tick_size"], tp_ticks, sl_ticks,
         minimum_trade_gap, max_parallel_trades, max_consecutive_direction,
         first_entry_time, last_entry_time,
-    )
+    ) if calculate_trades else []
     resolved_trades = [trade for trade in trades if trade["outcome"] != "OPEN"]
     wins = sum(trade["outcome"] == "TP" for trade in resolved_trades)
     total_pnl_ticks = sum(

@@ -5,7 +5,8 @@ from collections import Counter
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-def make_intraday_figure(result, ranked=False, candle_reduction=0, show_average=True):
+def make_intraday_figure(result, ranked=False, candle_reduction=0, show_average=True,
+                         show_trades=True):
     candles = result["candles"].copy()
     midpoint = ((candles["high"] + candles["low"]) / 2).round(2)
     reduction = float(1 if candle_reduction is None else candle_reduction)
@@ -20,8 +21,9 @@ def make_intraday_figure(result, ranked=False, candle_reduction=0, show_average=
     timeframe = result["timeframe_minutes"]
     timestamps = candles.index.strftime("%Y-%m-%d %H:%M")
     figure = make_subplots(
-        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03,
-        row_heights=[0.8, 0.2],
+        rows=2 if show_trades else 1, cols=1, shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=[0.8, 0.2] if show_trades else [1],
     )
     figure.add_trace(go.Candlestick(
         x=timestamps,
@@ -58,40 +60,41 @@ def make_intraday_figure(result, ranked=False, candle_reduction=0, show_average=
         line={"color": "#34d399", "width": 2},
         hovertemplate="Lower band: %{y}<extra></extra>",
     ))
-    trades = result["trades"]
-    daily_wins = Counter()
-    daily_losses = Counter()
-    for trade in trades:
-        if trade["outcome"] == "TP":
-            daily_wins[trade["entry_time"].date()] += 1
-        elif trade["outcome"] == "SL":
-            daily_losses[trade["entry_time"].date()] += 1
-    outcome_days = sorted(set(daily_wins) | set(daily_losses))
-    outcome_x = []
-    for day in outcome_days:
-        positions = [index for index, value in enumerate(candles.index.date)
-                     if value == day]
-        outcome_x.append(timestamps[positions[len(positions) // 2]])
-    daily_outcomes = [daily_wins[day] - daily_losses[day] for day in outcome_days]
-    figure.add_trace(go.Bar(
-        x=outcome_x, y=[abs(value) for value in daily_outcomes],
-        name="Daily outcome", width=3, opacity=0.8,
-        marker_color=["#22c55e" if value >= 0 else "#ef4444"
-                      for value in daily_outcomes],
-    ), row=2, col=1)
-    for direction, color, symbol in (
-        ("LONG", "#22c55e", "triangle-up"),
-        ("SHORT", "#ef4444", "triangle-down"),
-    ):
-        selected = [trade for trade in trades if trade["direction"] == direction]
-        figure.add_trace(go.Scatter(
-            x=[trade["entry_time"].strftime("%Y-%m-%d %H:%M") for trade in selected],
-            y=[trade["entry_price"] for trade in selected], mode="markers",
-            name=f"{direction} entry",
-            marker={"color": color, "size": 11, "symbol": symbol,
-                    "line": {"color": "white", "width": 1}},
-            hovertemplate=(f"{direction} entry: %{{y}}<extra></extra>"),
-        ))
+    if show_trades:
+        trades = result["trades"]
+        daily_wins = Counter()
+        daily_losses = Counter()
+        for trade in trades:
+            if trade["outcome"] == "TP":
+                daily_wins[trade["entry_time"].date()] += 1
+            elif trade["outcome"] == "SL":
+                daily_losses[trade["entry_time"].date()] += 1
+        outcome_days = sorted(set(daily_wins) | set(daily_losses))
+        outcome_x = []
+        for day in outcome_days:
+            positions = [index for index, value in enumerate(candles.index.date)
+                         if value == day]
+            outcome_x.append(timestamps[positions[len(positions) // 2]])
+        daily_outcomes = [daily_wins[day] - daily_losses[day] for day in outcome_days]
+        figure.add_trace(go.Bar(
+            x=outcome_x, y=[abs(value) for value in daily_outcomes],
+            name="Daily outcome", width=3, opacity=0.8,
+            marker_color=["#22c55e" if value >= 0 else "#ef4444"
+                          for value in daily_outcomes],
+        ), row=2, col=1)
+        for direction, color, symbol in (
+            ("LONG", "#22c55e", "triangle-up"),
+            ("SHORT", "#ef4444", "triangle-down"),
+        ):
+            selected = [trade for trade in trades if trade["direction"] == direction]
+            figure.add_trace(go.Scatter(
+                x=[trade["entry_time"].strftime("%Y-%m-%d %H:%M") for trade in selected],
+                y=[trade["entry_price"] for trade in selected], mode="markers",
+                name=f"{direction} entry",
+                marker={"color": color, "size": 11, "symbol": symbol,
+                        "line": {"color": "white", "width": 1}},
+                hovertemplate=(f"{direction} entry: %{{y}}<extra></extra>"),
+            ))
 
     figure.update_layout(
         title=(f"{result['symbol']} | {result['expression']} | "
@@ -110,7 +113,8 @@ def make_intraday_figure(result, ranked=False, candle_reduction=0, show_average=
         type="category", nticks=14,
     )
     figure.update_yaxes(title_text="Value", gridcolor="#333", row=1, col=1)
-    figure.update_yaxes(visible=False, row=2, col=1)
+    if show_trades:
+        figure.update_yaxes(visible=False, row=2, col=1)
     return figure
 
 

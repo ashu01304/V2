@@ -1,56 +1,60 @@
-"""Dash interface for interactive range testing."""
+"""Simple intraday price bands and rolling candle-range totals."""
 
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, dash_table, dcc, html
+from plotly.subplots import make_subplots
+from dash import Dash, Input, Output, State, dcc, html
 
-from CL_CO_testing.config import *
-from CL_CO_testing.engine import (
-    DEFAULT_STRATEGY, EXPRESSION_ROWS, calculate_chart, ranked_chart,
+from CL_CO_testing.config import (
+    DEFAULT_SYMBOL, DEFAULT_TIMEFRAME_MINUTES, DEFAULT_RANK_LOOKBACK,
+    DEFAULT_BAND_RANK, TIMEFRAME_OPTIONS,
 )
-from CL_CO_testing.charts import make_intraday_figure
+from CL_CO_testing.engine import (
+    DEFAULT_STRATEGY, EXPRESSION_ROWS, load_intraday_series, ranked_bands,
+)
+from CL_CO_testing.universe import UNIVERSE
+from product_config import PRODUCT_CONFIG
+from market_data.config import DATABASE_PATH
+from market_data.live_client import LiveMarketDataClient
+from market_data.chart_updates import preserve_live_charts
 
 app = Dash(__name__, assets_folder=str(Path(__file__).with_name("assets")))
-app.title = "Range Testing"
+app.title = "Range Bands"
 CONTRACTS = [row["Contract"] for row in EXPRESSION_ROWS[:7]]
+_database_version = None
 
 
-def range_figure(result, upper, lower, title):
-    candles = result["candles"]
-    timestamps = candles.index.strftime("%Y-%m-%d %H:%M")
-    figure = go.Figure([
-        go.Candlestick(x=timestamps, open=candles.open, high=candles.high,
-                       low=candles.low, close=candles.close, name="Price"),
-        go.Scatter(x=timestamps, y=upper, mode="lines", name="Upper bound",
-                   line={"color": "#fb7185", "width": 2}),
-        go.Scatter(x=timestamps, y=lower, mode="lines", name="Lower bound",
-                   line={"color": "#34d399", "width": 2}),
+def number_control(label, control_id, value, minimum=1, step=1):
+    return html.Label([
+        html.Span(label, style={"display": "block", "marginBottom": "5px"}),
+        dcc.Input(
+            id=control_id, type="number", min=minimum, step=step, value=value,
+            debounce=True, persistence=True, persistence_type="local",
+            style={"width": "120px", "padding": "6px 8px",
+                   "backgroundColor": "white", "color": "#111827"}),
     ])
-    figure.update_layout(
-        title=title, template="plotly_dark", paper_bgcolor="black",
-        plot_bgcolor="black", height=550, hovermode="x unified",
-        xaxis_rangeslider_visible=False, yaxis_tickformat=".2f",
-        legend={"orientation": "h", "y": 1.02},
-    )
-    figure.update_xaxes(type="category", nticks=14)
-    return figure
 
 
-def median_mad_bounds(candles, lookback, multiplier):
-    lookback, multiplier = int(lookback), float(multiplier)
-    values = candles.close.shift(1)
-    middle = values.rolling(lookback).median()
-    mad = values.rolling(lookback).apply(
-        lambda window: np.median(np.abs(window - np.median(window))), raw=True)
-    width = multiplier * 1.4826 * mad
-    return middle + width, middle - width
+def dropdown_control(label, control_id, options, value):
+    return html.Label([
+        html.Span(label, style={"display": "block", "marginBottom": "5px"}),
+        dcc.Dropdown(
+            id=control_id, options=options, value=value, clearable=False,
+            persistence=True, persistence_type="local",
+            style={"width": "160px", "color": "black"}),
+    ])
+
+
+def whole_number(value, label, minimum=1):
+    if value is None or not float(value).is_integer() or value < minimum:
+        raise ValueError(f"{label} must be a whole number of at least {minimum}")
+    return int(value)
 
 
 def quantile_bounds(candles, lookback, lower_percentile, upper_percentile):
-    lookback = int(lookback)
+    lookback = whole_number(lookback, "Quantile lookback", 2)
     lower_percentile, upper_percentile = float(lower_percentile), float(upper_percentile)
     if not 0 <= lower_percentile < upper_percentile <= 100:
         raise ValueError("Quantile percentiles must satisfy 0 <= lower < upper <= 100")
@@ -58,365 +62,150 @@ def quantile_bounds(candles, lookback, lower_percentile, upper_percentile):
             candles.low.shift(1).rolling(lookback).quantile(lower_percentile / 100))
 
 
-def ewma_bounds(candles, mean_span, volatility_span, multiplier):
-    mean_span, volatility_span = int(mean_span), int(volatility_span)
-    values = candles.close.shift(1)
-    middle = values.ewm(span=mean_span, min_periods=mean_span, adjust=False).mean()
-    volatility = ((values - middle) ** 2).ewm(
-        span=volatility_span, min_periods=volatility_span, adjust=False).mean() ** 0.5
-    width = float(multiplier) * volatility
-    return middle + width, middle - width
+def band_figure(candles, upper, lower, title, revision, candle_reduction,
+                range_window=None):
+    displayed = candles.copy()
+    reduction = float(candle_reduction or 0)
+    if not 0 <= reduction < float("inf"):
+        raise ValueError("Candle reduction must be a finite non-negative number")
+    midpoint = (candles.high + candles.low) / 2
+    displayed["high"] = (candles.high - reduction * 0.01).clip(lower=midpoint)
+    displayed["low"] = (candles.low + reduction * 0.01).clip(upper=midpoint)
+    displayed[["open", "close"]] = displayed[["open", "close"]].clip(
+        lower=displayed.low, upper=displayed.high, axis=0)
+    timestamps = candles.index.strftime("%Y-%m-%d %H:%M").tolist()
+    figure = make_subplots(
+        rows=2 if range_window is not None else 1, cols=1, shared_xaxes=True,
+        vertical_spacing=0.07,
+        row_heights=[0.75, 0.25] if range_window is not None else [1])
+    figure.add_trace(go.Candlestick(
+        x=timestamps, open=displayed.open.tolist(), high=displayed.high.tolist(),
+        low=displayed.low.tolist(), close=displayed.close.tolist(), name="Price"),
+        row=1, col=1)
+    for values, name, color in (
+            (upper, "Upper band", "#fb7185"), (lower, "Lower band", "#34d399")):
+        figure.add_trace(go.Scatter(
+            x=timestamps, y=values.tolist(), mode="lines", name=name,
+            line={"color": color, "width": 2}), row=1, col=1)
+    if range_window is not None:
+        # Use original candle highs/lows, independent of visual candle reduction.
+        config = PRODUCT_CONFIG["CL" if DEFAULT_SYMBOL == "CL-CO" else DEFAULT_SYMBOL]
+        tick_size = config["tick_size"]
+        # Synthetic subtraction can leave tiny positive floating-point residues.
+        # Normalize to whole ticks before deciding whether a range is non-zero.
+        range_ticks = ((candles.high - candles.low) / tick_size).round().astype("Int64")
+        nonzero_ticks = range_ticks[range_ticks > 0]
+        total_ticks = nonzero_ticks.rolling(
+            range_window, min_periods=range_window).sum()
+        # Zero-range candles retain the latest total without consuming the window.
+        totals = (total_ticks.reindex(candles.index).ffill() * tick_size).round(
+            config["price_decimals"])
+        figure.add_trace(go.Scatter(
+            x=timestamps, y=totals.tolist(), mode="lines",
+            name=f"Range sum ({range_window} non-zero candles)",
+            line={"color": "#38bdf8", "width": 2},
+            hovertemplate="Sum of non-zero high - low ranges: %{y:.4f}<extra></extra>"),
+            row=2, col=1)
+        figure.update_yaxes(title_text="Range sum", row=2, col=1, rangemode="tozero")
+    figure.update_layout(
+        title=title, template="plotly_dark", paper_bgcolor="black",
+        plot_bgcolor="black", height=800 if range_window is not None else 550,
+        hovermode="x unified", uirevision=revision,
+        legend={"orientation": "h", "y": 1.04}, margin={"t": 100})
+    figure.update_xaxes(type="category", nticks=14, rangeslider_visible=False)
+    figure.update_yaxes(title_text="Price", row=1, col=1)
+    return figure
 
 
-def swing_bounds(candles, confirmation, retained):
-    confirmation, retained = int(confirmation), int(retained)
-    peaks, valleys, upper, lower = [], [], [], []
-    highs, lows = candles.high.to_numpy(), candles.low.to_numpy()
-    for index in range(len(candles)):
-        pivot = index - 1 - confirmation
-        if pivot >= confirmation:
-            window = slice(pivot - confirmation, pivot + confirmation + 1)
-            if highs[pivot] == np.max(highs[window]):
-                peaks.append(highs[pivot])
-            if lows[pivot] == np.min(lows[window]):
-                valleys.append(lows[pivot])
-        upper.append(np.median(peaks[-retained:]) if len(peaks) >= retained else np.nan)
-        lower.append(np.median(valleys[-retained:]) if len(valleys) >= retained else np.nan)
-    return pd.Series(upper, index=candles.index), pd.Series(lower, index=candles.index)
-
-
-def session_bounds(candles, history_sessions, lower_percentile, upper_percentile):
-    history_sessions = int(history_sessions)
-    lower_percentile, upper_percentile = float(lower_percentile), float(upper_percentile)
-    if not 0 <= lower_percentile < upper_percentile <= 100:
-        raise ValueError("Session percentiles must satisfy 0 <= lower < upper <= 100")
-    local = candles.index.tz_convert("America/Chicago")
-    session = pd.Series((local - pd.Timedelta(hours=17)).date, index=candles.index)
-    slot = pd.Series((local.hour * 60 + local.minute - 17 * 60) % 1440,
-                     index=candles.index)
-    session_open = candles.open.groupby(session).transform("first")
-    change = candles.close - session_open
-    minimum = min(3, history_sessions)
-    lower_change = change.groupby(slot).transform(
-        lambda values: values.shift(1).rolling(history_sessions, min_periods=minimum)
-        .quantile(lower_percentile / 100))
-    upper_change = change.groupby(slot).transform(
-        lambda values: values.shift(1).rolling(history_sessions, min_periods=minimum)
-        .quantile(upper_percentile / 100))
-    return session_open + upper_change, session_open + lower_change
-
-
-def number_control(label, control_id, value, minimum=0.1, step=0.1):
-    return html.Label([
-        html.Span(label, style={"display": "block", "marginBottom": "5px"}),
-        dcc.Input(
-            id=control_id, type="number", min=minimum, step=step, value=value,
-            debounce=True, persistence=True, persistence_type="local",
-            style={
-                "width": "110px", "padding": "6px 8px", "fontWeight": "600",
-                "backgroundColor": "white", "color": "#111827",
-                "border": "1px solid #94a3b8", "borderRadius": "4px",
-            },
-        ),
-    ])
-
-
-def dropdown_control(label, control_id, options, value, width="145px"):
-    return html.Label([
-        html.Span(label, style={"display": "block", "marginBottom": "5px"}),
-        dcc.Dropdown(id=control_id, options=options, value=value, clearable=False,
-                     persistence=True, persistence_type="local",
-                     style={"width": width, "color": "black"}),
-    ])
-
-
-def range_section(title, controls, graph_id):
-    return html.Div([
-        html.H3(title, style={"margin": "0", "color": "#f97316"}),
-        html.Div(controls, style={"display": "flex", "gap": "20px",
-                                 "alignItems": "end", "flexWrap": "wrap"}),
-        dcc.Loading(dcc.Graph(id=graph_id, style={"width": "80%", "margin": "auto"}),
-                    type="circle"),
-    ], style={"padding": "16px 20px", "background": "#111827", "color": "white",
-              "borderTop": "1px solid #334155"})
-
+controls_style = {"display": "flex", "gap": "20px", "flexWrap": "wrap",
+                  "alignItems": "end", "padding": "18px 24px",
+                  "background": "#111827", "color": "white"}
 
 app.layout = html.Div([
     html.Div([
-        html.Strong("Chart settings", style={"alignSelf": "center", "color": "#f97316"}),
-        dropdown_control(
-            "Timeframe", "timeframe",
-            [
-                {"label": "30 min", "value": 30},
-                {"label": "60 min", "value": 60},
-                {"label": "240 min", "value": 240},
-            ],
-            DEFAULT_TIMEFRAME_MINUTES, "125px",
-        ),
-        dcc.Checklist(id="show-average", options=[{"label": "Show average line", "value": "show"}],
-                      value=["show"]),
-        number_control("Candle reduction (ticks)", "candle-reduction", 1, minimum=0, step=1),
-        number_control("TP (ticks)", "tp-ticks", DEFAULT_TP_TICKS),
-        number_control("SL (ticks)", "sl-ticks", DEFAULT_SL_TICKS),
-        number_control(
-            "Minimum trade gap (candles)", "minimum-trade-gap",
-            DEFAULT_MIN_TRADE_GAP_CANDLES,
-        ),
-        number_control(
-            "Max parallel trades", "max-parallel-trades",
-            DEFAULT_MAX_PARALLEL_POSITIONS,
-        ),
-        number_control(
-            "Max consecutive same direction", "max-consecutive-direction",
-            DEFAULT_MAX_CONSECUTIVE_DIRECTION,
-        ),
-        number_control("Days before CO expiry", "days-before-expiry",
-                       DEFAULT_DAYS_BEFORE_EXPIRY, minimum=1, step=1),
-        number_control("No-trade days before CO expiry", "no-trade-days",
-                       DEFAULT_NO_TRADE_DAYS_BEFORE_EXPIRY, minimum=0, step=1),
-    ], style={
-        "display": "grid",
-        "gridTemplateColumns": "repeat(auto-fit, minmax(145px, 1fr))",
-        "alignItems": "end", "gap": "16px", "padding": "18px 24px",
-        "background": "#111827", "color": "white",
-        "borderBottom": "1px solid #334155",
-    }),
-    html.Div(id="selected-expression", style={
-        "padding": "12px 20px", "background": "#0f172a", "color": "white",
-        "fontSize": "18px", "fontWeight": "600",
-    }),
-    dash_table.DataTable(
-        id="expression-table",
-        columns=[{"name": "Strategy", "id": "Strategy"}]
-                + [{"name": contract, "id": contract} for contract in CONTRACTS],
-        data=[{"Strategy": "Chart 2"}],
-        active_cell={"row": 0, "column": 1, "column_id": CONTRACTS[0],
-                     "row_id": None},
-        fixed_rows={"headers": True},
-        style_table={"width": "fit-content", "maxWidth": "100%",
-                     "margin": "0", "overflowX": "auto", "maxHeight": "420px",
-                     "border": "1px solid #334155"},
-        style_header={"backgroundColor": "#1e293b", "color": "white",
-                      "fontWeight": "700"},
-        style_cell={"backgroundColor": "#0f172a", "color": "white",
-                    "border": "1px solid #334155", "padding": "7px",
-                    "fontSize": "11px", "width": "250px",
-                    "minWidth": "250px", "maxWidth": "250px",
-                    "textAlign": "center",
-                    "overflow": "hidden", "textOverflow": "ellipsis"},
-        css=[{
-            "selector": ".dash-spreadsheet-container .dash-spreadsheet-inner",
-            "rule": "width: fit-content; min-width: 0;",
-        }, {
-            "selector": ".dash-spreadsheet-container table",
-            "rule": "width: auto; table-layout: fixed;",
-        }],
-        style_data_conditional=[
-            {"if": {"column_id": "Strategy"}, "width": "90px",
-             "minWidth": "90px", "maxWidth": "90px"},
-            {"if": {"state": "active"}, "backgroundColor": "#1d4ed8",
-             "border": "2px solid #93c5fd"},
-        ],
-    ),
-    html.Div(id="chart-error", style={"color": "#f87171", "padding": "0 20px"}),
+        dropdown_control("Contract", "contract", CONTRACTS,
+                         CONTRACTS[0] if CONTRACTS else None),
+        dropdown_control("Timeframe", "timeframe",
+                         [{"label": f"{value} min", "value": value}
+                          for value in TIMEFRAME_OPTIONS], DEFAULT_TIMEFRAME_MINUTES),
+        number_control("Ranked-band lookback", "rank-lookback", DEFAULT_RANK_LOOKBACK),
+        number_control("Band rank", "band-rank", DEFAULT_BAND_RANK),
+        number_control("Range sum (non-zero candles)", "range-window", 3),
+        number_control("Candle reduction (ticks)", "candle-reduction", 0, minimum=0),
+    ], style=controls_style),
+    html.Div(id="selected-expression", style={"padding": "12px 24px"}),
+    html.Div(id="chart-error", style={"color": "#f87171", "padding": "0 24px"}),
+    dcc.Graph(id="ranked-chart"),
+    html.H3("Rolling high/low quantiles", style={"padding": "0 24px"}),
     html.Div([
-        number_control("Ranked-band lookback", "rank-lookback",
-                       DEFAULT_RANK_LOOKBACK, minimum=1, step=1),
-        number_control("Band rank", "band-rank", DEFAULT_BAND_RANK,
-                       minimum=1, step=1),
-    ], style={"display": "flex", "justifyContent": "center", "gap": "20px",
-              "padding": "12px", "background": "#111827", "color": "white"}),
-    html.Div(id="ranked-trade-summary", style={
-        "display": "flex", "gap": "28px", "padding": "12px 20px",
-        "background": "#0f172a", "color": "white", "fontSize": "18px",
-    }),
-    dcc.Loading(dcc.Graph(id="ranked-chart", style={"width": "80%", "margin": "auto"}), type="circle"),
-    range_section("1. Rolling median + MAD", [
-        number_control("Lookback (candles)", "mad-lookback", 40, minimum=2, step=1),
-        number_control("MAD multiplier", "mad-multiplier", 2, minimum=0.1, step=0.1),
-    ], "mad-chart"),
-    range_section("2. Rolling high/low quantiles", [
-        number_control("Lookback (candles)", "quantile-lookback", 40, minimum=2, step=1),
-        number_control("Lower percentile", "lower-percentile", 10, minimum=0, step=1),
-        number_control("Upper percentile", "upper-percentile", 90, minimum=0, step=1),
-    ], "quantile-chart"),
-    range_section("3. EWMA adaptive bands", [
-        number_control("Mean span", "ewma-mean-span", 40, minimum=2, step=1),
-        number_control("Volatility span", "ewma-volatility-span", 20, minimum=2, step=1),
-        number_control("Width multiplier", "ewma-multiplier", 2, minimum=0.1, step=0.1),
-    ], "ewma-chart"),
-    range_section("4. Confirmed swing levels", [
-        number_control("Confirmation candles", "swing-confirmation", 3, minimum=1, step=1),
-        number_control("Retained swings", "retained-swings", 5, minimum=1, step=1),
-    ], "swing-chart"),
-    range_section("5. Historical time-of-session envelope", [
-        number_control("Historical sessions", "history-sessions", 20, minimum=1, step=1),
-        number_control("Lower percentile", "session-lower-percentile", 10,
-                       minimum=0, step=1),
-        number_control("Upper percentile", "session-upper-percentile", 90,
-                       minimum=0, step=1),
-    ], "session-chart"),
-], style={"background": "black", "minHeight": "100vh", "margin": "0"})
+        number_control("Lookback (candles)", "quantile-lookback", 40, minimum=2),
+        number_control("Lower percentile", "lower-percentile", 10, minimum=0),
+        number_control("Upper percentile", "upper-percentile", 90, minimum=0),
+    ], style=controls_style),
+    dcc.Graph(id="quantile-chart"),
+    dcc.Interval(id="live-refresh", interval=10_000, n_intervals=0),
+], style={"background": "black", "color": "white", "minHeight": "100vh"})
 
 
 @app.callback(
-    Output("ranked-chart", "figure"),
-    Output("mad-chart", "figure"),
-    Output("quantile-chart", "figure"),
-    Output("ewma-chart", "figure"),
-    Output("swing-chart", "figure"),
-    Output("session-chart", "figure"),
-    Output("chart-error", "children"),
-    Output("selected-expression", "children"),
-    Output("ranked-trade-summary", "children"),
-    Output("expression-table", "data"),
-    Output("expression-table", "columns"),
-    Input("expression-table", "active_cell"),
-    Input("timeframe", "value"),
-    Input("rank-lookback", "value"),
-    Input("band-rank", "value"),
-    Input("tp-ticks", "value"),
-    Input("sl-ticks", "value"),
-    Input("minimum-trade-gap", "value"),
-    Input("max-parallel-trades", "value"),
-    Input("max-consecutive-direction", "value"),
-    Input("days-before-expiry", "value"),
-    Input("no-trade-days", "value"),
-    Input("candle-reduction", "value"),
-    Input("show-average", "value"),
-    Input("mad-lookback", "value"),
-    Input("mad-multiplier", "value"),
-    Input("quantile-lookback", "value"),
-    Input("lower-percentile", "value"),
-    Input("upper-percentile", "value"),
-    Input("ewma-mean-span", "value"),
-    Input("ewma-volatility-span", "value"),
-    Input("ewma-multiplier", "value"),
-    Input("swing-confirmation", "value"),
-    Input("retained-swings", "value"),
-    Input("history-sessions", "value"),
-    Input("session-lower-percentile", "value"),
-    Input("session-upper-percentile", "value"),
+    Output("ranked-chart", "figure"), Output("quantile-chart", "figure"),
+    Output("chart-error", "children"), Output("selected-expression", "children"),
+    Input("contract", "value"), Input("timeframe", "value"),
+    Input("rank-lookback", "value"), Input("band-rank", "value"),
+    Input("range-window", "value"), Input("candle-reduction", "value"),
+    Input("quantile-lookback", "value"), Input("lower-percentile", "value"),
+    Input("upper-percentile", "value"), Input("live-refresh", "n_intervals"),
+    State("ranked-chart", "figure"), State("quantile-chart", "figure"),
 )
-def update_expression(active_cell, timeframe, rank_lookback, band_rank,
-                      tp_ticks, sl_ticks,
-                      minimum_trade_gap, max_parallel_trades,
-                      max_consecutive_direction,
-                      days_before_expiry, no_trade_days, candle_reduction, show_average,
-                      mad_lookback, mad_multiplier, quantile_lookback,
-                      lower_percentile, upper_percentile, ewma_mean_span,
-                      ewma_volatility_span, ewma_multiplier, swing_confirmation,
-                      retained_swings, history_sessions, session_lower_percentile,
-                      session_upper_percentile):
-    symbol = DEFAULT_SYMBOL
+@preserve_live_charts([0, 1])
+def update_expression(contract, timeframe, rank_lookback, band_rank,
+                      range_window, candle_reduction, quantile_lookback,
+                      lower_percentile, upper_percentile, _):
+    global _database_version
     try:
-        if not active_cell or active_cell.get("column_id") == "Strategy":
-            raise ValueError("Click a contract cell in the table")
-        contract = active_cell["column_id"]
-        strategy = DEFAULT_STRATEGY
-        timeframe = (DEFAULT_TIMEFRAME_MINUTES if timeframe is None else timeframe)
-        tp_ticks = DEFAULT_TP_TICKS if tp_ticks is None else tp_ticks
-        sl_ticks = DEFAULT_SL_TICKS if sl_ticks is None else sl_ticks
-        minimum_trade_gap = (
-            DEFAULT_MIN_TRADE_GAP_CANDLES
-            if minimum_trade_gap is None else minimum_trade_gap
-        )
-        max_parallel_trades = (
-            DEFAULT_MAX_PARALLEL_POSITIONS
-            if max_parallel_trades is None else max_parallel_trades
-        )
-        max_consecutive_direction = (
-            DEFAULT_MAX_CONSECUTIVE_DIRECTION
-            if max_consecutive_direction is None else max_consecutive_direction
-        )
-        days_before_expiry = (DEFAULT_DAYS_BEFORE_EXPIRY
-                              if days_before_expiry is None else days_before_expiry)
-        no_trade_days = (DEFAULT_NO_TRADE_DAYS_BEFORE_EXPIRY
-                         if no_trade_days is None else no_trade_days)
-        result = calculate_chart(
-            symbol, contract, strategy,
-            DEFAULT_Z_SCORE_THRESHOLD, DEFAULT_Z_SCORE_LOOKBACK, timeframe,
-            days_before_expiry, no_trade_days,
-            tp_ticks, sl_ticks, minimum_trade_gap, max_parallel_trades,
-            max_consecutive_direction, DEFAULT_MOVING_AVERAGE_LOOKBACK,
-        )
-        ranked = ranked_chart(
-            result,
-            DEFAULT_RANK_LOOKBACK if rank_lookback is None else rank_lookback,
-            DEFAULT_BAND_RANK if band_rank is None else band_rank,
-        )
-        candles = result["candles"]
-        mad_upper, mad_lower = median_mad_bounds(candles, mad_lookback, mad_multiplier)
-        quantile_upper, quantile_lower = quantile_bounds(
+        if contract not in CONTRACTS:
+            raise ValueError("Select a contract")
+        range_window = whole_number(range_window, "Range sum window")
+        lookback = whole_number(rank_lookback, "Ranked-band lookback")
+        rank = whole_number(band_rank, "Band rank")
+        expression = UNIVERSE["contracts"][contract][DEFAULT_STRATEGY]
+        version = DATABASE_PATH.stat().st_mtime_ns
+        if version != _database_version:
+            load_intraday_series.cache_clear()
+            _database_version = version
+        candles = load_intraday_series(DEFAULT_SYMBOL, expression, timeframe)
+        upper, lower = ranked_bands(candles, lookback, rank)
+        title = f"{DEFAULT_SYMBOL} | {expression} | {timeframe}-minute candles"
+        revision = f"{DEFAULT_SYMBOL}:{expression}:{timeframe}"
+        ranked = band_figure(
+            candles, upper, lower, title, revision, candle_reduction, range_window)
+        upper, lower = quantile_bounds(
             candles, quantile_lookback, lower_percentile, upper_percentile)
-        ewma_upper, ewma_lower = ewma_bounds(
-            candles, ewma_mean_span, ewma_volatility_span, ewma_multiplier)
-        swing_upper, swing_lower = swing_bounds(
-            candles, swing_confirmation, retained_swings)
-        session_upper, session_lower = session_bounds(
-            candles, history_sessions, session_lower_percentile,
-            session_upper_percentile)
-        experimental_figures = (
-            range_figure(result, mad_upper, mad_lower, "Rolling median + MAD"),
-            range_figure(result, quantile_upper, quantile_lower,
-                         "Rolling high/low quantiles"),
-            range_figure(result, ewma_upper, ewma_lower, "EWMA adaptive bands"),
-            range_figure(result, swing_upper, swing_lower, "Confirmed swing levels"),
-            range_figure(result, session_upper, session_lower,
-                         "Historical time-of-session envelope"),
-        )
-        selected = f"Selected: {symbol} / {contract} / {strategy} / {result['expression']}"
-        ranked_summary = [
-            html.Span(f"Total trades: {ranked['total_trades']}"),
-            html.Span(f"Resolved: {ranked['resolved_trades']}"),
-            html.Span(f"Open: {ranked['open_trades']}"),
-            html.Span(f"Win rate: {ranked['win_rate']:.1%}"
-                      if ranked["win_rate"] is not None else "Win rate: N/A"),
-            html.Span(f"Total PnL: {ranked['total_pnl_ticks']:+d} ticks"),
-        ]
-        chart_2_row = {"Strategy": "Chart 2"}
-        valid_contracts = []
-        for item_contract in CONTRACTS:
-            try:
-                item = result if item_contract == contract else calculate_chart(
-                    symbol, item_contract, strategy,
-                    DEFAULT_Z_SCORE_THRESHOLD, DEFAULT_Z_SCORE_LOOKBACK, timeframe,
-                    days_before_expiry, no_trade_days,
-                    tp_ticks, sl_ticks, minimum_trade_gap, max_parallel_trades,
-                    max_consecutive_direction, DEFAULT_MOVING_AVERAGE_LOOKBACK,
-                )
-            except ValueError:
-                continue
-            valid_contracts.append(item_contract)
-            item_ranked = ranked_chart(
-                item,
-                DEFAULT_RANK_LOOKBACK if rank_lookback is None else rank_lookback,
-                DEFAULT_BAND_RANK if band_rank is None else band_rank,
-            )
-            ranked_win = (f"{item_ranked['win_rate']:.0%}"
-                          if item_ranked["win_rate"] is not None else "N/A")
-            chart_2_row[item_contract] = (
-                f"Win : {ranked_win} | PnL : {item_ranked['total_pnl_ticks']:+d} | "
-                f"{item_ranked['total_trades']} Trades"
-            )
-        return (
-            make_intraday_figure(ranked, ranked=True, candle_reduction=candle_reduction,
-                                 show_average=bool(show_average)),
-            *experimental_figures,
-            "", selected,
-            ranked_summary, [chart_2_row],
-            [{"name": "Strategy", "id": "Strategy"}] + [
-                {"name": item, "id": item} for item in valid_contracts
-            ],
-        )
+        quantiles = band_figure(
+            candles, upper, lower, "Rolling high/low quantiles",
+            revision + ":quantiles", candle_reduction)
+        live_status = ""
+        client = LiveMarketDataClient(timeout=2)
+        try:
+            quote = client.expression(DEFAULT_SYMBOL, expression)
+            quote_time = pd.Timestamp(quote["timestamp"])
+            candle_time = quote_time.floor(f"{int(timeframe)}min")
+            for figure in (ranked, quantiles):
+                figure.add_trace(go.Scatter(
+                    x=[candle_time.strftime("%Y-%m-%d %H:%M")],
+                    y=[float(quote["value"])], mode="markers", name="Live price",
+                    marker={"color": "#22c55e", "size": 12},
+                    customdata=[[quote_time.strftime("%Y-%m-%d %H:%M:%S UTC")]],
+                    hovertemplate="Live: %{y:.4f}<br>%{customdata[0]}<extra></extra>"),
+                    row=1, col=1)
+            title += f" | Live: {float(quote['value']):.4f} | {quote_time:%H:%M:%S} UTC"
+        except Exception as error:
+            live_status = f"Live quote unavailable: {error}"
+        finally:
+            client.close()
+        return ranked, quantiles, live_status, title
     except Exception as error:
-        return (
-            go.Figure(), go.Figure(), go.Figure(), go.Figure(), go.Figure(),
-            go.Figure(), str(error),
-            "No expression selected", [],
-            [{"Strategy": "Chart 2"}],
-            [{"name": "Strategy", "id": "Strategy"}],
-        )
+        return go.Figure(), go.Figure(), str(error), ""
 
 
 if __name__ == "__main__":

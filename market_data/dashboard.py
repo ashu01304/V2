@@ -102,7 +102,7 @@ app.layout = html.Div([
     Output("health", "children"), Output("contract", "options"),
     Output("contract", "value"), Output("snapshot", "data"),
     Output("snapshot", "columns"), Output("forward-curve", "figure"),
-    Input("history-timer", "n_intervals"), Input("refresh", "n_clicks"),
+    Input("timer", "n_intervals"), Input("refresh", "n_clicks"),
     Input("product", "value"), State("contract", "value"), State('forward-curve', "figure"))
 @preserve_live_charts([5])
 def update_live(_, __, product, selected):

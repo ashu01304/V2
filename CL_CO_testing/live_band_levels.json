@@ -1,7 +1,7 @@
 {
   "version": 3,
-  "bucket": 1988899,
-  "refreshed_at": "2026-09-21T16:55:10.245049+00:00",
+  "bucket": 1989746,
+  "refreshed_at": "2026-09-30T12:30:03.982999+00:00",
   "levels": [
     {
       "Contract": "X26",
@@ -10,11 +10,11 @@
       "TP/SL": 2,
       "Lookback": 25,
       "Rank": 5,
-      "Upper": -0.28,
-      "Lower": -0.54,
+      "Upper": -2.88,
+      "Lower": -3.55,
       "Win rate": 0.8215488215488216,
       "Trades": 297,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "X26",
@@ -23,11 +23,11 @@
       "TP/SL": 2,
       "Lookback": 25,
       "Rank": 5,
-      "Upper": -0.28,
-      "Lower": -0.54,
+      "Upper": -2.88,
+      "Lower": -3.55,
       "Win rate": 0.8215488215488216,
       "Trades": 297,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "X26",
@@ -36,11 +36,11 @@
       "TP/SL": 2,
       "Lookback": 25,
       "Rank": 5,
-      "Upper": -0.28,
-      "Lower": -0.54,
+      "Upper": -2.88,
+      "Lower": -3.55,
       "Win rate": 0.8193548387096774,
       "Trades": 310,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "X26",
@@ -49,11 +49,11 @@
       "TP/SL": 2,
       "Lookback": 25,
       "Rank": 5,
-      "Upper": -0.28,
-      "Lower": -0.54,
+      "Upper": -2.88,
+      "Lower": -3.55,
       "Win rate": 0.8193548387096774,
       "Trades": 310,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "X26",
@@ -62,11 +62,11 @@
       "TP/SL": 3,
       "Lookback": 35,
       "Rank": 5,
-      "Upper": -0.11,
-      "Lower": -0.54,
+      "Upper": -2.68,
+      "Lower": -3.55,
       "Win rate": 0.7659574468085106,
       "Trades": 235,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "X26",
@@ -75,11 +75,11 @@
       "TP/SL": 3,
       "Lookback": 35,
       "Rank": 5,
-      "Upper": -0.11,
-      "Lower": -0.54,
+      "Upper": -2.68,
+      "Lower": -3.55,
       "Win rate": 0.7649572649572649,
       "Trades": 234,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "X26",
@@ -88,11 +88,11 @@
       "TP/SL": 3,
       "Lookback": 35,
       "Rank": 5,
-      "Upper": -0.11,
-      "Lower": -0.54,
+      "Upper": -2.68,
+      "Lower": -3.55,
       "Win rate": 0.7682119205298014,
       "Trades": 151,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "X26",
@@ -101,11 +101,11 @@
       "TP/SL": 3,
       "Lookback": 35,
       "Rank": 5,
-      "Upper": -0.11,
-      "Lower": -0.54,
+      "Upper": -2.68,
+      "Lower": -3.55,
       "Win rate": 0.7682119205298014,
       "Trades": 151,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "Z26",
@@ -114,11 +114,11 @@
       "TP/SL": 2,
       "Lookback": 25,
       "Rank": 5,
-      "Upper": 0.01,
-      "Lower": -0.08,
+      "Upper": -0.47,
+      "Lower": -0.68,
       "Win rate": 0.8215488215488216,
       "Trades": 297,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "Z26",
@@ -127,11 +127,11 @@
       "TP/SL": 2,
       "Lookback": 25,
       "Rank": 5,
-      "Upper": 0.01,
-      "Lower": -0.08,
+      "Upper": -0.47,
+      "Lower": -0.68,
       "Win rate": 0.8215488215488216,
       "Trades": 297,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "Z26",
@@ -140,11 +140,11 @@
       "TP/SL": 2,
       "Lookback": 25,
       "Rank": 5,
-      "Upper": 0.01,
-      "Lower": -0.08,
+      "Upper": -0.47,
+      "Lower": -0.68,
       "Win rate": 0.8193548387096774,
       "Trades": 310,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "Z26",
@@ -153,11 +153,11 @@
       "TP/SL": 2,
       "Lookback": 25,
       "Rank": 5,
-      "Upper": 0.01,
-      "Lower": -0.08,
+      "Upper": -0.47,
+      "Lower": -0.68,
       "Win rate": 0.8193548387096774,
       "Trades": 310,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "Z26",
@@ -166,11 +166,11 @@
       "TP/SL": 3,
       "Lookback": 35,
       "Rank": 5,
-      "Upper": 0.08,
-      "Lower": -0.08,
+      "Upper": -0.46,
+      "Lower": -0.68,
       "Win rate": 0.7659574468085106,
       "Trades": 235,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "Z26",
@@ -179,11 +179,11 @@
       "TP/SL": 3,
       "Lookback": 35,
       "Rank": 5,
-      "Upper": 0.08,
-      "Lower": -0.08,
+      "Upper": -0.46,
+      "Lower": -0.68,
       "Win rate": 0.7649572649572649,
       "Trades": 234,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "Z26",
@@ -192,11 +192,11 @@
       "TP/SL": 3,
       "Lookback": 35,
       "Rank": 5,
-      "Upper": 0.08,
-      "Lower": -0.08,
+      "Upper": -0.46,
+      "Lower": -0.68,
       "Win rate": 0.7682119205298014,
       "Trades": 151,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "Z26",
@@ -205,11 +205,11 @@
       "TP/SL": 3,
       "Lookback": 35,
       "Rank": 5,
-      "Upper": 0.08,
-      "Lower": -0.08,
+      "Upper": -0.46,
+      "Lower": -0.68,
       "Win rate": 0.7682119205298014,
       "Trades": 151,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "F27",
@@ -218,11 +218,11 @@
       "TP/SL": 2,
       "Lookback": 25,
       "Rank": 5,
-      "Upper": 0.04,
-      "Lower": -0.02,
+      "Upper": -0.2,
+      "Lower": -0.28,
       "Win rate": 0.8215488215488216,
       "Trades": 297,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "F27",
@@ -231,11 +231,11 @@
       "TP/SL": 2,
       "Lookback": 25,
       "Rank": 5,
-      "Upper": 0.04,
-      "Lower": -0.02,
+      "Upper": -0.2,
+      "Lower": -0.28,
       "Win rate": 0.8215488215488216,
       "Trades": 297,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "F27",
@@ -244,11 +244,11 @@
       "TP/SL": 2,
       "Lookback": 25,
       "Rank": 5,
-      "Upper": 0.04,
-      "Lower": -0.02,
+      "Upper": -0.2,
+      "Lower": -0.28,
       "Win rate": 0.8193548387096774,
       "Trades": 310,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "F27",
@@ -257,11 +257,11 @@
       "TP/SL": 2,
       "Lookback": 25,
       "Rank": 5,
-      "Upper": 0.04,
-      "Lower": -0.02,
+      "Upper": -0.2,
+      "Lower": -0.28,
       "Win rate": 0.8193548387096774,
       "Trades": 310,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "F27",
@@ -270,11 +270,11 @@
       "TP/SL": 3,
       "Lookback": 35,
       "Rank": 5,
-      "Upper": 0.08,
-      "Lower": -0.02,
+      "Upper": -0.2,
+      "Lower": -0.3,
       "Win rate": 0.7659574468085106,
       "Trades": 235,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "F27",
@@ -283,11 +283,11 @@
       "TP/SL": 3,
       "Lookback": 35,
       "Rank": 5,
-      "Upper": 0.08,
-      "Lower": -0.02,
+      "Upper": -0.2,
+      "Lower": -0.3,
       "Win rate": 0.7649572649572649,
       "Trades": 234,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "F27",
@@ -296,11 +296,11 @@
       "TP/SL": 3,
       "Lookback": 35,
       "Rank": 5,
-      "Upper": 0.08,
-      "Lower": -0.02,
+      "Upper": -0.2,
+      "Lower": -0.3,
       "Win rate": 0.7682119205298014,
       "Trades": 151,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "F27",
@@ -309,14 +309,118 @@
       "TP/SL": 3,
       "Lookback": 35,
       "Rank": 5,
-      "Upper": 0.08,
-      "Lower": -0.02,
+      "Upper": -0.2,
+      "Lower": -0.3,
       "Win rate": 0.7682119205298014,
       "Trades": 151,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "G27",
+      "Run": 1192,
+      "Timeframe": 60,
+      "TP/SL": 2,
+      "Lookback": 25,
+      "Rank": 5,
+      "Upper": -0.01,
+      "Lower": -0.05,
+      "Win rate": 0.8215488215488216,
+      "Trades": 297,
+      "Calculated": "2026-09-30 11:00:00+00:00"
+    },
+    {
+      "Contract": "G27",
+      "Run": 1210,
+      "Timeframe": 60,
+      "TP/SL": 2,
+      "Lookback": 25,
+      "Rank": 5,
+      "Upper": -0.01,
+      "Lower": -0.05,
+      "Win rate": 0.8215488215488216,
+      "Trades": 297,
+      "Calculated": "2026-09-30 11:00:00+00:00"
+    },
+    {
+      "Contract": "G27",
+      "Run": 1156,
+      "Timeframe": 60,
+      "TP/SL": 2,
+      "Lookback": 25,
+      "Rank": 5,
+      "Upper": -0.01,
+      "Lower": -0.05,
+      "Win rate": 0.8193548387096774,
+      "Trades": 310,
+      "Calculated": "2026-09-30 11:00:00+00:00"
+    },
+    {
+      "Contract": "G27",
+      "Run": 1174,
+      "Timeframe": 60,
+      "TP/SL": 2,
+      "Lookback": 25,
+      "Rank": 5,
+      "Upper": -0.01,
+      "Lower": -0.05,
+      "Win rate": 0.8193548387096774,
+      "Trades": 310,
+      "Calculated": "2026-09-30 11:00:00+00:00"
+    },
+    {
+      "Contract": "G27",
+      "Run": 1717,
+      "Timeframe": 60,
+      "TP/SL": 3,
+      "Lookback": 35,
+      "Rank": 5,
+      "Upper": -0.01,
+      "Lower": -0.06,
+      "Win rate": 0.7659574468085106,
+      "Trades": 235,
+      "Calculated": "2026-09-30 11:00:00+00:00"
+    },
+    {
+      "Contract": "G27",
+      "Run": 1699,
+      "Timeframe": 60,
+      "TP/SL": 3,
+      "Lookback": 35,
+      "Rank": 5,
+      "Upper": -0.01,
+      "Lower": -0.06,
+      "Win rate": 0.7649572649572649,
+      "Trades": 234,
+      "Calculated": "2026-09-30 11:00:00+00:00"
+    },
+    {
+      "Contract": "G27",
+      "Run": 1693,
+      "Timeframe": 60,
+      "TP/SL": 3,
+      "Lookback": 35,
+      "Rank": 5,
+      "Upper": -0.01,
+      "Lower": -0.06,
+      "Win rate": 0.7682119205298014,
+      "Trades": 151,
+      "Calculated": "2026-09-30 11:00:00+00:00"
+    },
+    {
+      "Contract": "G27",
+      "Run": 1711,
+      "Timeframe": 60,
+      "TP/SL": 3,
+      "Lookback": 35,
+      "Rank": 5,
+      "Upper": -0.01,
+      "Lower": -0.06,
+      "Win rate": 0.7682119205298014,
+      "Trades": 151,
+      "Calculated": "2026-09-30 11:00:00+00:00"
+    },
+    {
+      "Contract": "H27",
       "Run": 1192,
       "Timeframe": 60,
       "TP/SL": 2,
@@ -326,10 +430,10 @@
       "Lower": 0.0,
       "Win rate": 0.8215488215488216,
       "Trades": 297,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
-      "Contract": "G27",
+      "Contract": "H27",
       "Run": 1210,
       "Timeframe": 60,
       "TP/SL": 2,
@@ -339,10 +443,10 @@
       "Lower": 0.0,
       "Win rate": 0.8215488215488216,
       "Trades": 297,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
-      "Contract": "G27",
+      "Contract": "H27",
       "Run": 1156,
       "Timeframe": 60,
       "TP/SL": 2,
@@ -352,10 +456,10 @@
       "Lower": 0.0,
       "Win rate": 0.8193548387096774,
       "Trades": 310,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
-      "Contract": "G27",
+      "Contract": "H27",
       "Run": 1174,
       "Timeframe": 60,
       "TP/SL": 2,
@@ -365,111 +469,7 @@
       "Lower": 0.0,
       "Win rate": 0.8193548387096774,
       "Trades": 310,
-      "Calculated": "2026-09-21 15:00:00+00:00"
-    },
-    {
-      "Contract": "G27",
-      "Run": 1717,
-      "Timeframe": 60,
-      "TP/SL": 3,
-      "Lookback": 35,
-      "Rank": 5,
-      "Upper": 0.04,
-      "Lower": 0.0,
-      "Win rate": 0.7659574468085106,
-      "Trades": 235,
-      "Calculated": "2026-09-21 15:00:00+00:00"
-    },
-    {
-      "Contract": "G27",
-      "Run": 1699,
-      "Timeframe": 60,
-      "TP/SL": 3,
-      "Lookback": 35,
-      "Rank": 5,
-      "Upper": 0.04,
-      "Lower": 0.0,
-      "Win rate": 0.7649572649572649,
-      "Trades": 234,
-      "Calculated": "2026-09-21 15:00:00+00:00"
-    },
-    {
-      "Contract": "G27",
-      "Run": 1693,
-      "Timeframe": 60,
-      "TP/SL": 3,
-      "Lookback": 35,
-      "Rank": 5,
-      "Upper": 0.04,
-      "Lower": 0.0,
-      "Win rate": 0.7682119205298014,
-      "Trades": 151,
-      "Calculated": "2026-09-21 15:00:00+00:00"
-    },
-    {
-      "Contract": "G27",
-      "Run": 1711,
-      "Timeframe": 60,
-      "TP/SL": 3,
-      "Lookback": 35,
-      "Rank": 5,
-      "Upper": 0.04,
-      "Lower": 0.0,
-      "Win rate": 0.7682119205298014,
-      "Trades": 151,
-      "Calculated": "2026-09-21 15:00:00+00:00"
-    },
-    {
-      "Contract": "H27",
-      "Run": 1192,
-      "Timeframe": 60,
-      "TP/SL": 2,
-      "Lookback": 25,
-      "Rank": 5,
-      "Upper": 0.05,
-      "Lower": 0.02,
-      "Win rate": 0.8215488215488216,
-      "Trades": 297,
-      "Calculated": "2026-09-21 15:00:00+00:00"
-    },
-    {
-      "Contract": "H27",
-      "Run": 1210,
-      "Timeframe": 60,
-      "TP/SL": 2,
-      "Lookback": 25,
-      "Rank": 5,
-      "Upper": 0.05,
-      "Lower": 0.02,
-      "Win rate": 0.8215488215488216,
-      "Trades": 297,
-      "Calculated": "2026-09-21 15:00:00+00:00"
-    },
-    {
-      "Contract": "H27",
-      "Run": 1156,
-      "Timeframe": 60,
-      "TP/SL": 2,
-      "Lookback": 25,
-      "Rank": 5,
-      "Upper": 0.05,
-      "Lower": 0.02,
-      "Win rate": 0.8193548387096774,
-      "Trades": 310,
-      "Calculated": "2026-09-21 15:00:00+00:00"
-    },
-    {
-      "Contract": "H27",
-      "Run": 1174,
-      "Timeframe": 60,
-      "TP/SL": 2,
-      "Lookback": 25,
-      "Rank": 5,
-      "Upper": 0.05,
-      "Lower": 0.02,
-      "Win rate": 0.8193548387096774,
-      "Trades": 310,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "H27",
@@ -478,11 +478,11 @@
       "TP/SL": 3,
       "Lookback": 35,
       "Rank": 5,
-      "Upper": 0.06,
-      "Lower": 0.02,
+      "Upper": 0.03,
+      "Lower": 0.0,
       "Win rate": 0.7659574468085106,
       "Trades": 235,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "H27",
@@ -491,11 +491,11 @@
       "TP/SL": 3,
       "Lookback": 35,
       "Rank": 5,
-      "Upper": 0.06,
-      "Lower": 0.02,
+      "Upper": 0.03,
+      "Lower": 0.0,
       "Win rate": 0.7649572649572649,
       "Trades": 234,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "H27",
@@ -504,11 +504,11 @@
       "TP/SL": 3,
       "Lookback": 35,
       "Rank": 5,
-      "Upper": 0.06,
-      "Lower": 0.02,
+      "Upper": 0.03,
+      "Lower": 0.0,
       "Win rate": 0.7682119205298014,
       "Trades": 151,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     },
     {
       "Contract": "H27",
@@ -517,11 +517,11 @@
       "TP/SL": 3,
       "Lookback": 35,
       "Rank": 5,
-      "Upper": 0.06,
-      "Lower": 0.02,
+      "Upper": 0.03,
+      "Lower": 0.0,
       "Win rate": 0.7682119205298014,
       "Trades": 151,
-      "Calculated": "2026-09-21 15:00:00+00:00"
+      "Calculated": "2026-09-30 11:00:00+00:00"
     }
   ]
 }

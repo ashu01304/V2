@@ -199,6 +199,7 @@ def update_chart(symbol, contracts, structures, zero_base, past_days, _, __,
             raise ValueError("Market closed: no current trading session")
         database = MarketData()
         missing, points = [], 0
+        live_client = LiveMarketDataClient(timeout=2)
         try:
             for contract, expression in selections.items():
                 try:
@@ -234,6 +235,12 @@ def update_chart(symbol, contracts, structures, zero_base, past_days, _, __,
                     "day": (local - pd.Timedelta(hours=17) + pd.Timedelta(days=1)).date,
                 })
                 sessions = sessions[sessions["minute"] < 1380]
+                quote = None
+                if start <= end < session_close and session_open.dayofweek not in (4, 5):
+                    try:
+                        quote = live_client.expression(symbol, expression)
+                    except Exception as error:
+                        missing.append(f"{contract}: live quote unavailable ({error})")
                 for day, values in sessions.groupby("day"):
                     opening = values["price"].iloc[0]
                     figure.add_trace(go.Scatter(
@@ -248,8 +255,12 @@ def update_chart(symbol, contracts, structures, zero_base, past_days, _, __,
                         marker={"size": 6,
                                 **({"color": "white"} if day == session_date else {})},
                         hovertemplate="%{customdata[0]} CT<br>Value: %{y:+.4f}<br>Open: %{customdata[1]:.4f}<extra>%{fullData.name}</extra>"))
-                    if day == session_date:
-                        latest = values.iloc[-1]
+                    if day == session_date and quote is not None:
+                        quote_time = pd.Timestamp(quote["timestamp"]).tz_convert("America/Chicago").tz_localize(None)
+                        latest = {
+                            "time": quote_time, "price": float(quote["value"]),
+                            "minute": (quote_time.hour * 60 + quote_time.minute - 17 * 60) % 1440,
+                        }
                         figure.add_trace(go.Scatter(
                             x=[latest["minute"]],
                             y=[round(latest["price"] - opening, 4)
@@ -273,6 +284,7 @@ def update_chart(symbol, contracts, structures, zero_base, past_days, _, __,
                     points += len(values)
         finally:
             database.close()
+            live_client.close()
         if zero_base:
             figure.add_hline(y=0, line_width=1, line_color="#94a3b8")
             continuous.add_hline(y=0, line_width=1, line_color="#94a3b8")

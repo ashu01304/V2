@@ -41,6 +41,12 @@ class LiveMarketDataClient:
         return self._get("/history", product=product, contract=contract)
 
     def expression(self, product, expression):
+        if product == "CL-CO":
+            cl = self._get("/expression/latest", product="CL", expression=expression)
+            co = self._get("/expression/latest", product="CO", expression=expression)
+            return {"product": product, "expression": expression,
+                    "value": cl["value"] - co["value"],
+                    "timestamp": min(cl["timestamp"], co["timestamp"])}
         return self._get("/expression/latest", product=product, expression=expression)
 
     def expression_history(self, product, expression):
