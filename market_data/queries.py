@@ -4,11 +4,20 @@ import duckdb
 import pandas as pd
 
 from .config import DATABASE_PATH
+from .reader_snapshots import acquire_snapshot, release_snapshot
 
 
 class MarketData:
     def __init__(self, path=DATABASE_PATH):
-        self.connection = duckdb.connect(str(Path(path)), read_only=True)
+        self._snapshot_key, snapshot = acquire_snapshot(path)
+        try:
+            self.connection = duckdb.connect(
+                str(snapshot), read_only=True,
+                config={"memory_limit": "512MB", "threads": "2"},
+            )
+        except BaseException:
+            release_snapshot(self._snapshot_key)
+            raise
         # Compatibility for existing analysis code that executes settlement SQL.
         self.cursor = self.connection
         self.conn = self.connection
@@ -84,3 +93,4 @@ class MarketData:
         if not self._closed:
             self.connection.close()
             self._closed = True
+            release_snapshot(self._snapshot_key)

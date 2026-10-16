@@ -1,0 +1,17 @@
+# Python dependencies for all dashboards, analysis, backtesting, and market data.
+# Install from this folder: python -m pip install -r requirments.txt
+
+dash
+duckdb
+ijson
+lightgbm
+lightstreamer-client-lib
+numpy
+openpyxl
+pandas
+plotly
+requests
+scikit-learn
+scipy
+umap-learn
+urllib3

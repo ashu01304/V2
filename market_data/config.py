@@ -15,4 +15,6 @@ SEAC_URL = (
 )
 
 SPREAD_OVERLAP_MINUTES = 3
-BATCH_SIZE = 500_000
+# Keep Python batches small while DuckDB also holds indexes and query buffers.
+BATCH_SIZE = 50_000
+DUCKDB_MEMORY_LIMIT = '1GB'

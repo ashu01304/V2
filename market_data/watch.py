@@ -1,17 +1,17 @@
+import argparse
+import faulthandler
 import logging
 import msvcrt
 import sys
-import time
 from pathlib import Path
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from market_data.config import DATA_DIR
+from market_data.config import DATABASE_PATH, DATA_DIR
 from market_data.sync import update
 
 
-UPDATE_INTERVAL_SECONDS = 15 * 60
 LOG_PATH = DATA_DIR / "market_data_sync.log"
 LOCK_PATH = DATA_DIR / "market_data_sync.lock"
 
@@ -19,15 +19,19 @@ LOCK_PATH = DATA_DIR / "market_data_sync.lock"
 def configure_logging():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
-        filename=LOG_PATH,
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(LOG_PATH, encoding="utf-8"),
+        ],
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(message)s",
+        force=True,
     )
 
 
 def acquire_lock():
+    lock = Path(LOCK_PATH).open("a+")
     try:
-        lock = Path(LOCK_PATH).open("a+")
         lock.seek(0)
         if not lock.read(1):
             lock.write("1")
@@ -35,43 +39,46 @@ def acquire_lock():
         lock.seek(0)
         msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
     except OSError:
-        if "lock" in locals():
-            lock.close()
-        return None
+        lock.close()
+        raise
     return lock
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Create or refresh the market database.")
+    parser.add_argument("--once", action="store_true", help="Compatibility option: every run updates once and exits.")
+    parser.parse_args()
     configure_logging()
-    lock = acquire_lock()
-    if lock is None:
-        message = "15-minute updater is already running; new process stopped."
-        print(message, flush=True)
-        logging.warning(message)
-        return
-
-    logging.info("Hourly market-data updater started")
-    include_settlements = True
+    faulthandler.enable()
+    logging.info("Market-data updater started | database: %s", DATABASE_PATH)
+    logging.info("Progress and errors are also saved to %s", LOG_PATH)
     try:
-        while True:
-            started = time.monotonic()
-            try:
-                result = update(include_settlements=include_settlements)
-                message = (
-                    "Market-data update completed successfully | "
-                    f"new spread points: {result['spread_added']:,} | "
-                    f"new settlement points: {result['settlement_added']:,}"
-                )
-                logging.info(message)
-                include_settlements = False
-            except Exception:
-                logging.exception("Market-data update failed; it will retry next hour")
+        lock = acquire_lock()
+    except OSError:
+        logging.exception(
+            "Cannot acquire updater lock at %s. Check for another watcher "
+            "or a file-access problem.", LOCK_PATH
+        )
+        return 1
 
-            elapsed = time.monotonic() - started
-            time.sleep(max(0, UPDATE_INTERVAL_SECONDS - elapsed))
+    try:
+        result = update(include_settlements=True)
+        logging.info(
+            "Update completed successfully | new spread points: %s | "
+            "new settlement points: %s | database: %s",
+            f"{result['spread_added']:,}", f"{result['settlement_added']:,}",
+            DATABASE_PATH,
+        )
+        return 0
+    except Exception:
+        logging.exception("Market-data update failed; database was not published.")
+        return 1
+    except KeyboardInterrupt:
+        logging.warning("Updater stopped by user. An unfinished import is not published.")
+        return 130
     finally:
         lock.close()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

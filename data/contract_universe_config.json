@@ -1,0 +1,8 @@
+{
+  "symbol": "CL",
+  "nearby_months": 9,
+  "deferred_months": ["H", "M", "U", "Z"],
+  "years_ahead": 3,
+  "keep_expiry_day": true,
+  "custom_structures": []
+}

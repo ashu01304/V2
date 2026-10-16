@@ -1,14 +1,21 @@
-﻿"""Live Lightstreamer bridge. Run: python market_data/live_service.py."""
+"""Live Lightstreamer bridge. Run: python market_data/live_service.py."""
 import argparse
 import json
 import logging
 import math
 import re
+import sys
+from pathlib import Path
 import threading
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from market_data.live_history import LiveMinuteRecorder
 
 CONTRACT_URL = "https://insight-x.corp.hertshtengroup.com/api/v1/insight/getPDSInstruments"
 ENDPOINT = "https://ls-md.corp.hertshtengroup.com"
@@ -74,15 +81,16 @@ def get_instruments(products):
 
 
 class PriceStore:
-    def __init__(self, instruments, max_age=120):
+    def __init__(self, instruments, max_age=120, recorder=None):
         self.instruments = instruments
         self.max_age = max_age
+        self.recorder = recorder
         self.rows = {}
         self.lock = threading.RLock()
         self.status = "CONNECTING"
         self.error = None
 
-    def update(self, item, fields):
+    def update(self, item, fields, record=True):
         if item not in self.instruments:
             return
         product, contract = self.instruments[item]
@@ -99,6 +107,8 @@ class PriceStore:
         with self.lock:
             first = not self.rows
             self.rows[(product, contract)] = row
+        if self.recorder is not None and record:
+            self.recorder.record(product, contract, row["value"], now)
         if first:
             logging.info("First price update received: %s %s", product, contract)
 
@@ -108,7 +118,8 @@ class PriceStore:
             age = datetime.now(timezone.utc).timestamp() - newest if newest else None
             return dict(status=self.status, error=self.error,
                         subscribed_instruments=len(self.instruments),
-                        received_instruments=len(self.rows), latest_update_age_seconds=age)
+                        received_instruments=len(self.rows), latest_update_age_seconds=age,
+                        minute_recording=self.recorder.health() if self.recorder else None)
 
     def snapshot(self, products, raw=False):
         with self.lock:
@@ -195,7 +206,8 @@ def main():
         parser.error("--max-age must be positive")
     logging.info("Loading corporate instrument IDs")
     instruments = get_instruments(list(dict.fromkeys(product_name(p) for p in args.products)))
-    store = PriceStore(instruments, args.max_age)
+    recorder = LiveMinuteRecorder()
+    store = PriceStore(instruments, args.max_age, recorder)
 
     class ConnectionListener(ClientListener):
         def onStatusChange(self, status):
@@ -212,7 +224,8 @@ def main():
         def onItemUpdate(self, update):
             try:
                 store.update(update.getItemName(),
-                             {field: update.getValue(field) for field in FIELDS})
+                             {field: update.getValue(field) for field in FIELDS},
+                             record=not update.isSnapshot())
             except Exception:
                 logging.exception("Could not process live price update")
 
@@ -231,6 +244,7 @@ def main():
     subscription.addListener(PriceListener())
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(store))
     try:
+        recorder.start()
         client.subscribe(subscription)
         client.connect()
         logging.info("Serving %d instruments at http://127.0.0.1:%s; Ctrl+C to stop",
@@ -241,6 +255,7 @@ def main():
     finally:
         server.server_close()
         client.disconnect()
+        recorder.close()
 
 
 if __name__ == "__main__":

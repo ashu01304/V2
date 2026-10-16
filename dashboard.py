@@ -1,39 +1,58 @@
-from pathlib import Path
 from threading import Lock, Thread
+from datetime import datetime
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from dash import Dash, Input, Output, State, ctx, dcc, html, dash_table, no_update
+from dash import (
+    Dash, Input, Output, State, ALL, Patch, ctx, dcc, html,
+    dash_table, no_update, set_props,
+)
 
 from market_data.chart_updates import preserve_live_charts
-from market_data import MarketData
+from market_data import LiveMarketDataClient, MarketData
+from requests import RequestException
 from analysis.expression import parse_expression
-from analysis.feature_creation import FeatureCreator
 from analysis.forward_curve import ForwardCurve
 from analysis.plotting import SeasonalityPlotter
 from analysis.rollover import StrategyRollover
 from analysis.seasonality import Seasonality
 from analysis.contract_universe import load_universe
+from dashboard_components.minute_charts import minute_charts_layout, register_minute_chart_callbacks
+from dashboard_components.bookmark_ranges import register_bookmark_ranges
 
 RANK_YEARS = 4
-ZSCORE_WINDOW = 42
-SLOPE_DAYS = 10
-AMAN_LOOKBACK = 45
 
-def expression_metrics(sznlty, features, symbol, expression, rank_years,
-                       zscore_window, slope_days,
-                       aman_lookback=AMAN_LOOKBACK):
+
+def log_dashboard(message):
+    print(
+        f"[dashboard {datetime.now().strftime('%H:%M:%S')}] {message}",
+        flush=True,
+    )
+CONTRACT_MONTHS = {
+    "F": "Jan", "G": "Feb", "H": "Mar", "J": "Apr",
+    "K": "May", "M": "Jun", "N": "Jul", "Q": "Aug",
+    "U": "Sep", "V": "Oct", "X": "Nov", "Z": "Dec",
+}
+
+
+def format_contract_label(contract):
+    contract = str(contract)
+    month = CONTRACT_MONTHS.get(contract[:1])
+    return f"{contract[0]} ({month}) {contract[1:]}" if month else contract
+
+
+def expression_metrics(sznlty, symbol, expression, rank_years):
     legs = parse_expression(expression)
     codes = sorted({code for _, code in legs})
     histories = sznlty.db.get_contract_history(symbol, codes)
     if not legs or any(code not in histories or histories[code].empty for code in codes):
-        return None, None, None, None, None, None, None
+        return None, None
     common = None
     for code in codes:
         dates = pd.DatetimeIndex(histories[code].index).normalize()
         common = dates if common is None else common.intersection(dates)
     if common is None or common.empty:
-        return None, None, None, None, None, None, None
+        return None, None
     anchor = legs[0][1]
     expiry = sznlty.official_or_last_date(symbol, anchor, histories[anchor])
     required = max(0, int(np.busday_count(
@@ -43,157 +62,193 @@ def expression_metrics(sznlty, features, symbol, expression, rank_years,
     current_year = 2000 + int(anchor[1:])
     result = sznlty.working_day_expression_seasonality(
         symbol, expression, current_year - rank_years + 1, current_year,
-        max(400, required + zscore_window + 10),
+        max(400, required + 10),
     )
     combined = result.get("combined", pd.DataFrame())
     current = next((column for column in combined if int(column) == current_year), None)
     if current is None or combined[current].dropna().empty:
-        return None, None, None, None, None, None, None
+        return None, None
     live = combined[current].dropna()
-    day = live.index.max()
-    rank_data = features.calculate_current_rank_ratio(combined, rank_years)
-    if day not in rank_data.index or pd.isna(rank_data.at[day, "Rank"]):
-        return None, None, None, None, None, None, None
-    rank = f"{int(rank_data.at[day, 'Rank'])}/{int(rank_data.at[day, 'Count'])}"
-    zscore = features.create_live_features(
-        live, {"TECH_ZScore": {"window": zscore_window}}
-    ).get("TECH_ZScore")
-    slope_metrics = features.calculate_forward_slope_metrics(
-        combined, slope_days, rank_years - 1
-    ).loc[day]
-    aman = features.calculate_bollinger_signal(live, aman_lookback)["signal"]
-    return (float(live.iloc[-1]), rank,
-            None if pd.isna(zscore) else float(zscore),
-            None if pd.isna(slope_metrics["Median"]) else float(slope_metrics["Median"]),
-            None if pd.isna(slope_metrics["Direction"]) else float(slope_metrics["Direction"]),
-            aman, result)
-
-def calculate_dashboard(universe, selected_columns, symbol, rank_years, zscore_window,
-                        slope_days, job_id):
-    names = ("values", "ranks", "zscores", "slopes", "directions", "aman")
-    results, db = {}, MarketData()
-    sznlty, features = Seasonality(db), FeatureCreator()
-    empty_frame = pd.DataFrame(
-        None, index=range(len(universe["contracts"])),
-        columns=["Contract", *columns], dtype=object,
+    settlement = sum(
+        coefficient * histories[code].loc[common.max(), "Close"]
+        for coefficient, code in legs
     )
-    empty_frame["Contract"] = list(universe["contracts"])
-    frames = {name: empty_frame.copy() for name in names}
+    value = float(live.iloc[-1])
+    return (value, value - float(settlement)), result
+
+
+def latest_settlement_date(database):
+    date = database.connection.execute(
+        "SELECT MAX(trading_date) FROM seac_settlements"
+    ).fetchone()[0]
+    return pd.Timestamp(date).strftime("%Y-%m-%d") if date is not None else "unavailable"
+
+
+def latest_live_timestamp():
+    client = LiveMarketDataClient()
     try:
-        batches = [selected_columns[i:i + 2] for i in range(0, len(selected_columns), 2)]
-        for batch_number, batch in enumerate(batches, 1):
-            for row, (_, strategies) in enumerate(universe["contracts"].items()):
-                for strategy in batch:
+        # Expression prices also use the bridge's received_at timestamp.
+        rows = client.snapshot()
+        timestamps = pd.to_datetime(
+            [row.get("received_at") for row in rows if row.get("value") is not None],
+            utc=True, errors="coerce",
+        ).dropna()
+        if timestamps.empty:
+            return "unavailable"
+        return timestamps.max().tz_convert("Europe/London").strftime("%Y-%m-%d %H:%M:%S %Z")
+    except RequestException:
+        return "unavailable (live service unreachable)"
+    finally:
+        client.close()
+
+def copy_frames(frames):
+    return {name: frame.copy() for name, frame in frames.items()}
+
+
+def product_frames(symbol):
+    existing = dashboard_state["frames"].get(symbol)
+    return copy_frames(existing if existing is not None else {
+        "values": empty_frames["values"], "changes": empty_frames["values"],
+    })
+
+
+def calculate_dashboard(
+    universe, selected_columns, symbols, rank_years, job_id, live_refresh=False,
+):
+    log_dashboard(f"job {job_id} started ({'live refresh' if live_refresh else 'analysis'})")
+    db = MarketData()
+    try:
+        sznlty = Seasonality(db)
+        with state_lock:
+            frames = {symbol: product_frames(symbol) for symbol in symbols}
+            results = {key: value for key, value in dashboard_state["results"].items()
+                       if key[0] in symbols}
+            dashboard_state["settlement_date"] = latest_settlement_date(db)
+        for symbol in symbols:
+            for row, strategies in enumerate(universe["contracts"].values()):
+                for strategy in selected_columns:
+                    expression = strategies[strategy]
+                    cache_key = (symbol, expression, rank_years[symbol])
                     with state_lock:
                         if job_id != dashboard_state["job_id"]:
                             return
-                    expression = strategies[strategy]
-                    metrics = expression_metrics(
-                        sznlty, features, symbol, expression, rank_years,
-                        zscore_window, slope_days,
-                    )
-                    for name, value in zip(names, metrics[:6]):
-                        frames[name].at[row, strategy] = value
-                    if metrics[6] is not None:
-                        results[expression] = metrics[6]
-            with state_lock:
-                if job_id != dashboard_state["job_id"]:
-                    return
-                snapshot = {name: frame.copy() for name, frame in frames.items()}
-                dashboard_state.update({
-                    "display": make_display(snapshot), "slopes": snapshot["slopes"],
-                    "zscores": snapshot["zscores"], "aman": snapshot["aman"],
-                    "results": results.copy(), "version": dashboard_state["version"] + 1,
-                    "title": f"{symbol} — batch {batch_number}/{len(batches)} complete",
-                })
+                        cached = dashboard_state["cache"].get(cache_key)
+                    if cached is None:
+                        cached = expression_metrics(
+                            sznlty, symbol, expression, rank_years[symbol],
+                        )
+                        with state_lock:
+                            dashboard_state["cache"][cache_key] = cached
+                    metrics, result = cached
+                    if metrics is None:
+                        continue
+                    value, change = metrics
+                    frames[symbol]["values"].at[row, strategy] = value
+                    frames[symbol]["changes"].at[row, strategy] = change
+                    if result is not None:
+                        results[(symbol, expression)] = result
+            publish_dashboard_snapshot(frames, results, [symbol], job_id, live_refresh)
     except Exception:
         with state_lock:
             if job_id == dashboard_state["job_id"]:
-                dashboard_state.update({"processing": False,
-                                        "title": f"{symbol} — processing failed",
-                                        "version": dashboard_state["version"] + 1})
+                dashboard_state["processing"] = False
+                dashboard_state["version"] += int(not live_refresh)
+        log_dashboard(f"job {job_id} failed")
         raise
     finally:
         db.close()
     with state_lock:
         if job_id == dashboard_state["job_id"]:
-            dashboard_state.update({"processing": False,
-                                    "title": f"{symbol} — Latest Contract Values",
-                                    "version": dashboard_state["version"] + 1})
+            dashboard_state["processing"] = False
+            dashboard_state["version"] += int(not live_refresh)
+            log_dashboard(f"job {job_id} finished")
 
-def format_value(value):
+
+def publish_dashboard_snapshot(frames, results, symbols, job_id, live_refresh=False):
+    with state_lock:
+        if job_id != dashboard_state["job_id"]:
+            return
+        snapshot = {symbol: copy_frames(frames)
+                    for symbol, frames in dashboard_state["frames"].items()}
+        snapshot.update({symbol: copy_frames(frames[symbol]) for symbol in symbols})
+        displays = {symbol: make_display(frames, symbol) for symbol, frames in snapshot.items()}
+        pending_live_updates = dashboard_state["live_updates"]
+        if live_refresh:
+            updates = {
+                symbol: {column: displays[symbol][column].tolist() for column in columns}
+                for symbol in symbols
+            }
+            if updates:
+                pending_live_updates = {**(pending_live_updates or {}), **updates}
+        dashboard_state.update({
+            "frames": snapshot,
+            "displays": displays,
+            "results": {**dashboard_state["results"], **results},
+            "version": dashboard_state["version"] + int(not live_refresh),
+            "updated_symbols": list(symbols),
+            "live_updates": pending_live_updates,
+        })
+
+def format_value(value, precision=3):
     if value is None or pd.isna(value):
         return "-"
 
-    return np.format_float_positional(float(value), precision=10, trim="-")
-
-def interpolate_color(start, end, ratio):
-    rgb = tuple(round(a + (b - a) * ratio) for a, b in zip(start, end))
-    return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
-
-def zscore_color(zscore):
-    if zscore is None or pd.isna(zscore):
-        return "#64748b"
-    zscore = max(-2.0, min(2.0, float(zscore)))
-    start, end, ratio = (
-        ((220, 38, 38), (250, 204, 21), (zscore + 2) / 2)
-        if zscore < 0 else
-        ((250, 204, 21), (22, 163, 74), zscore / 2)
-    )
-    return interpolate_color(start, end, ratio)
-
-def rank_color(rank):
-    if rank is None or pd.isna(rank):
-        return "#64748b"
-    position, total = map(int, rank.split("/"))
-    ratio = 0 if total <= 1 else (position - 1) / (total - 1)
-    start, end, ratio = (
-        ((22, 163, 74), (250, 204, 21), ratio * 2)
-        if ratio < 0.5 else
-        ((250, 204, 21), (220, 38, 38), (ratio - 0.5) * 2)
-    )
-    return interpolate_color(start, end, ratio)
-
-def format_cell(value, rank, zscore, slope, direction, aman):
-    if all(item is None or pd.isna(item) for item in (value, rank, zscore, slope, direction, aman)):
-        return ""
-    valid = format_value(value) != "-" and rank is not None and not pd.isna(rank)
-    value_text = format_value(value) if valid else "-"
-    rank_text = rank if valid else "-"
-    zscore_text = f"{zscore:.3f}" if valid and pd.notna(zscore) else "-"
-    slope_text = format_value(slope) if valid and pd.notna(slope) else "-"
-    direction_text = f"{direction:+.0f}%" if valid and pd.notna(direction) else "-"
-    aman_signal = aman if isinstance(aman, str) else None
-    aman_text = {"LONG": "B", "SHORT": "S", "NEUTRAL": "N"}.get(aman_signal, "-")
-    aman_class = aman_signal.lower() if aman_signal else "missing"
-    return (
-        "<div class='metric-cell'><div class='metric-left'>"
-        f"<div class='metric-value'>{value_text}</div><div>M = {slope_text}</div>"
-        f"<div>D = {direction_text}</div>"
-        f"<div class='aman-{aman_class}'>Aman = {aman_text}</div>"
-        "</div><div class='metric-right'>"
-        f"<div><span class='metric-square' style='background:{zscore_color(zscore)}'></span>{zscore_text}</div>"
-        f"<div><span class='metric-square' style='background:{rank_color(rank if valid else None)}'></span>{rank_text}</div>"
-        "</div></div>"
-    )
+    return f"{float(value):.{precision}f}"
 
 # Build the current expression matrix from expiry data.
 universe = load_universe()
 
 columns = universe["columns"]
 
-def make_display(frames):
-    values, ranks = frames["values"], frames["ranks"]
-    zscores, slopes = frames["zscores"], frames["slopes"]
-    directions, aman = frames["directions"], frames["aman"]
+def format_change(value, precision=3):
+    if value is None or pd.isna(value):
+        return "-"
+    return f"{float(value):+.{precision}f}"
+
+
+def change_color(value):
+    if value is None or pd.isna(value):
+        return "#3E362E"
+    if float(value) > 0:
+        return "#146C2E"
+    if float(value) < 0:
+        return "#A61B1B"
+    return "#3E362E"
+
+
+def format_change_display(value, precision=3):
+    change = format_change(value, precision)
+    if change == "-":
+        return "—", change
+    numeric_change = float(value)
+    if numeric_change > 0:
+        return "▲", change
+    if numeric_change < 0:
+        return "▼", change
+    return "—", change
+
+
+def make_display(frames, symbol=None):
+    precision = 2 if symbol in {"CL", "CO", "CL-CO"} else 3
+    values = frames["values"]
+    changes = frames.get("changes")
     display = values.copy()
     for column in columns:
+        if changes is None:
+            display[column] = [format_value(value, precision) for value in values[column]]
+            continue
         display[column] = [
-            format_cell(value, rank, zscore, slope, direction, signal)
-            for value, rank, zscore, slope, direction, signal in zip(
-                values[column], ranks[column], zscores[column], slopes[column],
-                directions[column], aman[column]
+            (
+                f"<div class=\"market-cell\">"
+                f"<div class=\"market-live\">{format_value(value, precision)}</div>"
+                f"<div class=\"market-change\" style=\"color: {change_color(change)};\">"
+                f"<span class=\"market-arrow\">{format_change_display(change, precision)[0]}</span> "
+                f"{format_change_display(change, precision)[1]}</div>"
+                f"</div>"
             )
+            if pd.notna(change)
+            else format_value(value, precision)
+            for value, change in zip(values[column], changes[column])
         ]
     return display
 
@@ -201,47 +256,41 @@ product_db = MarketData()
 try:
     product_db.cursor.execute("SELECT DISTINCT symbol FROM seac_settlements ORDER BY symbol")
     products = [row[0] for row in product_db.cursor.fetchall()]
+    settlement_date = latest_settlement_date(product_db)
     if "CL" in products and "CO" in products and "CL-CO" not in products:
         products.append("CL-CO")
 finally:
     product_db.close()
 
-empty = pd.DataFrame({"Contract": list(universe["contracts"])})
-frames = {name: empty.reindex(columns=["Contract", *columns])
-          for name in ("values", "ranks", "zscores", "slopes", "directions", "aman")}
-seasonality_results = {}
-display_df = make_display(frames)
-dashboard_state = {"display": display_df, "slopes": frames["slopes"],
-                   "zscores": frames["zscores"], "aman": frames["aman"],
-                   "results": seasonality_results,
-                   "symbol": None, "version": 0, "job_id": 0,
-                   "processing": False, "title": "Select a product"}
+empty_frame = pd.DataFrame({"Contract": list(universe["contracts"])})
+empty_frames = {"values": empty_frame.reindex(columns=["Contract", *columns])}
+dashboard_state = {"displays": {}, "frames": {}, "results": {}, "cache": {},
+                   "version": 0, "job_id": 0,
+                   "processing": False, "updated_symbols": [],
+                   "live_updates": None,
+                   "settlement_date": settlement_date, "live_timestamp": "unavailable"}
 state_lock = Lock()
 
 def control(label, component):
     return html.Label([html.Span(label), component], className="control-group")
 
-def number_control(label, component_id, value, minimum, step):
-    return control(label, dcc.Input(id=component_id, type="number", value=value,
-                                    min=minimum, step=step, debounce=True,
-                                    className="control-input"))
 
 app = Dash(__name__)
 app.title = "Market Curves"
 plotter = SeasonalityPlotter()
 app.layout = html.Div([
-    html.H3("Select a product", id="page-title"),
     html.Div([
         control("Product", dcc.Dropdown(
             id="product-selector",
             options=[{"label": product, "value": product} for product in products],
-            value=None, placeholder="Select product",
+            value=None, placeholder="Select products", multi=True,
+            persistence=True, persistence_type="local",
             clearable=True, className="product-dropdown")),
-        number_control("Rank years", "rank-years", RANK_YEARS, 2, 1),
-        number_control("Z-score window", "zscore-window", ZSCORE_WINDOW, 2, 1),
-        number_control("Slope days", "slope-days", SLOPE_DAYS, 1, 1),
-        number_control("|Median slope| >", "slope-threshold", 0.05, None, 0.0001),
-        number_control("|Z-score| >", "zscore-threshold", 1.5, None, 0.1),
+        html.Div(
+            id="data-status",
+            children="Latest settlement date: — | Latest live data: —",
+            className="data-status",
+        ),
         html.Button("Apply", id="apply-parameters", n_clicks=0,
                     className="apply-button"),
     ], className="control-row"),
@@ -258,48 +307,22 @@ app.layout = html.Div([
             labelStyle={"marginRight": "10px"},
         ),
     ], className="columns-panel"),
-    html.Div([
-        html.Span("Highlights:"),
-        dcc.Checklist(
-            id="highlight-selector",
-            options=[{"label": "Slope", "value": "slope"},
-                     {"label": "Z-score", "value": "zscore"},
-                     {"label": "Aman B/S", "value": "aman"}],
-            value=["slope", "zscore", "aman"],
-            inline=True,
-            persistence=True,
-            persistence_type="local",
-            inputStyle={"marginLeft": "8px", "marginRight": "3px"},
-        ),
-    ], className="highlight-options"),
-    dash_table.DataTable(
-        id="contracts-table",
-        data=display_df.to_dict("records"),
-        columns=[{"name": column, "id": column, "presentation": "markdown"}
-                 for column in display_df.columns],
-        markdown_options={"html": True},
-        style_table={"overflowX": "auto"},
-        style_header={"backgroundColor": "#17243a", "color": "#f8fafc",
-                      "fontWeight": "bold", "textAlign": "center"},
-        style_cell={"backgroundColor": "#111827", "color": "#f8fafc",
-                    "border": "1px solid #354258", "textAlign": "center",
-                    "minWidth": "98px", "width": "98px", "maxWidth": "98px",
-                    "height": "90px", "fontSize": "10px", "padding": "2px"},
-        style_cell_conditional=[{"if": {"column_id": "Contract"},
-                                 "minWidth": "48px", "width": "48px", "maxWidth": "48px"}],
-        style_data_conditional=[{"if": {"row_index": "odd"},
-                                 "backgroundColor": "#151f30"}],
-        css=[{"selector": "p", "rule": "margin:0"}],
-    ),
+    html.Div(id="product-tables", children=html.Div()),
     html.Div([
         html.Div(id="modal-backdrop", n_clicks=0,
-                 style={"position": "absolute", "inset": "0"}),
+                 style={
+                     "position": "fixed",
+                     "inset": "0",
+                     "zIndex": "1000",
+                     "backgroundColor": "rgba(0,0,0,0.75)",
+                     "cursor": "pointer",
+                 }),
         html.Div([
             html.Button("×", id="close-modal", style={
                 "position": "absolute", "top": "10px", "right": "14px",
                 "zIndex": "1002", "fontSize": "30px", "lineHeight": "30px",
                 "width": "40px", "height": "40px", "color": "white",
-                "backgroundColor": "#dc2626", "border": "none",
+                "backgroundColor": "#865D36", "border": "none",
                 "borderRadius": "6px", "cursor": "pointer",
             }),
             dcc.Graph(id="seasonality-chart", style={
@@ -309,159 +332,363 @@ app.layout = html.Div([
                 dcc.Graph(id="forward-curve-chart", style={"height": "610px", "width": "50%"}),
             ], style={"display": "flex", "width": "100%", "height": "610px",
                       "flexShrink": "0", "marginTop": "12px"}),
+            minute_charts_layout(),
         ], style={"position": "relative", "zIndex": "1001",
                   "display": "flex", "flexDirection": "column",
-                  "backgroundColor": "black", "overflowY": "auto",
+                  "backgroundColor": "#3E362E", "overflowY": "auto",
                   "width": "99%", "height": "90vh", "padding": "4px 4px 0"}),
     ], id="chart-modal", style={"display": "none"}),
+    dcc.Store(id="product-year-preferences", storage_type="local", data={}),
     dcc.Store(id="data-version", data=0),
+    dcc.Store(id="live-cell-updates"),
+    dcc.Store(id="live-cell-update-ack"),
     dcc.Store(id="selected-cell"),
     dcc.Interval(id="refresh-results", interval=500, n_intervals=0, disabled=True),
     dcc.Interval(id="live-chart-refresh", interval=10_000, n_intervals=0),
-], style={"backgroundColor": "#0b1220", "color": "#f8fafc",
+], style={"backgroundColor": "#3E362E", "color": "#FFF8EF",
           "minHeight": "100vh", "padding": "8px"})
 
+
+def build_rank_years(symbols, values, ids, saved_years=None):
+    values_by_product = dict(saved_years or {})
+    values_by_product.update({
+        item["product"]: max(2, int(value or RANK_YEARS))
+        for item, value in zip(ids or [], values or []) if value is not None
+    })
+    return {
+        symbol: max(2, int(values_by_product.get(symbol) or RANK_YEARS))
+        for symbol in symbols
+    }
+
+
+def start_dashboard_job(symbols, selected, live_refresh):
+    with state_lock:
+        if live_refresh:
+            if dashboard_state["processing"]:
+                return None
+            dashboard_state["cache"] = {
+                key: value
+                for key, value in dashboard_state["cache"].items()
+                if key[0] not in symbols
+            }
+
+        job_id = dashboard_state["job_id"] + 1
+        frames = {symbol: product_frames(symbol) for symbol in symbols}
+        dashboard_state.update({
+            "frames": frames,
+            "displays": {
+                symbol: make_display(product_frames, symbol)
+                for symbol, product_frames in frames.items()
+            },
+            "version": (
+                dashboard_state["version"]
+                if live_refresh
+                else dashboard_state["version"] + 1
+            ),
+            "job_id": job_id,
+            "processing": bool(selected),
+            "updated_symbols": [],
+            "live_updates": None,
+        })
+        return job_id
+
+
+def launch_dashboard_job(symbols, selected, rank_years, job_id, live_refresh):
+    if not selected or job_id is None:
+        return
+    Thread(
+        target=calculate_dashboard,
+        args=(
+            universe,
+            selected,
+            symbols,
+            rank_years,
+            job_id,
+            live_refresh,
+        ),
+        daemon=True,
+    ).start()
+
+
+def dashboard_response(displayed_version, live_updates=no_update, disabled=None):
+    # Caller holds state_lock so the four outputs describe one snapshot.
+    version = dashboard_state["version"]
+    return (
+        (f"Latest settlement date: {dashboard_state['settlement_date']} | "
+         f"Latest live data: {dashboard_state['live_timestamp']}"),
+        version if version != displayed_version else no_update,
+        not dashboard_state["processing"] if disabled is None else disabled,
+        live_updates,
+    )
+
+
 @app.callback(
-    Output("contracts-table", "data"),
-    Output("page-title", "children"),
+    Output("data-status", "children"),
     Output("data-version", "data"),
     Output("refresh-results", "disabled"),
+    Output("live-cell-updates", "data"),
     Input("apply-parameters", "n_clicks"),
-    Input("product-selector", "value"),
     Input("refresh-results", "n_intervals"),
-    State("rank-years", "value"),
-    State("zscore-window", "value"),
-    State("slope-days", "value"),
+    Input("live-chart-refresh", "n_intervals"),
+    Input({"type": "rank-apply", "product": ALL}, "n_clicks"),
+    State("product-selector", "value"),
     State("column-selector", "value"),
-    prevent_initial_call=True,
+    State({"type": "rank-years", "product": ALL}, "value"),
+    State({"type": "rank-years", "product": ALL}, "id"),
+    State("data-version", "data"),
+    State("product-year-preferences", "data"),
 )
-def apply_parameters(_, symbol, __, rank_years, zscore_window, slope_days, selected):
-    if ctx.triggered_id == "refresh-results":
+def apply_parameters(
+    _, __, ___, _rank_clicks, symbols, selected, rank_years, rank_ids,
+    displayed_version, saved_years,
+):
+    trigger = ctx.triggered_id
+    if trigger is None or trigger == "live-chart-refresh":
+        # Refresh the header even when no products are selected or a job is busy.
+        timestamp = latest_live_timestamp()
         with state_lock:
-            return (dashboard_state["display"].to_dict("records"),
-                    dashboard_state["title"], dashboard_state["version"],
-                    not dashboard_state["processing"])
-    if not symbol:
-        return (display_df.to_dict("records"), "Select a product",
-                dashboard_state["version"], True)
+            dashboard_state["live_timestamp"] = timestamp
+    if isinstance(trigger, dict) and trigger.get("type") == "rank-apply":
+        # Inserting/rebuilding tables also fires their dynamic button inputs.
+        # Only a real click should start an analysis job.
+        clicked = next(
+            (clicks for item, clicks in zip(ctx.inputs_list[3], _rank_clicks or [])
+             if item["id"] == trigger),
+            None,
+        )
+        if not clicked:
+            return (no_update,) * 4
+    if trigger == "refresh-results":
+        with state_lock:
+            live_updates = dashboard_state["live_updates"]
+            dashboard_state["live_updates"] = None
+            return dashboard_response(displayed_version, live_updates or no_update)
+    symbols = list(dict.fromkeys(symbols or []))
+    if not symbols:
+        with state_lock:
+            return dashboard_response(displayed_version, disabled=True)
     selected = [column for column in columns if column in (selected or [])]
-    blank = {name: frame.copy() for name, frame in frames.items()}
+    rank_years = build_rank_years(symbols, rank_years, rank_ids, saved_years)
+    live_refresh = trigger == "live-chart-refresh"
+    job_id = start_dashboard_job(symbols, selected, live_refresh)
+    launch_dashboard_job(
+        symbols, selected, rank_years, job_id, live_refresh
+    )
     with state_lock:
-        job_id = dashboard_state["job_id"] + 1
-        dashboard_state.update({
-            "display": make_display(blank), "slopes": blank["slopes"],
-            "zscores": blank["zscores"], "aman": blank["aman"], "results": {},
-            "symbol": symbol, "version": dashboard_state["version"] + 1,
-            "job_id": job_id, "processing": bool(selected),
-            "title": f"{symbol} — processing 0/{len(selected)} categories",
-        })
-        current = (dashboard_state["display"].to_dict("records"),
-                   dashboard_state["title"], dashboard_state["version"],
-                   not dashboard_state["processing"])
-    if selected:
-        Thread(target=calculate_dashboard, args=(
-            universe, selected, symbol, int(rank_years), int(zscore_window),
-            int(slope_days), job_id,
-        ), daemon=True).start()
-    return current
+        return dashboard_response(displayed_version)
+
+def render_tables(displays, saved_years=None):
+    rank_years = build_rank_years(list(displays), [], [], saved_years)
+    table_style = {"overflowX": "auto", "flex": "0 0 auto", "margin": "0"}
+    cell_style = {
+        "backgroundColor": "#A69080",
+        "color": "#3E362E",
+        "border": "1px solid #93785B",
+        "textAlign": "center",
+        "minWidth": "98px",
+        "width": "98px",
+        "maxWidth": "98px",
+        "height": "68px",
+        "fontSize": "10px",
+        "padding": "2px",
+        "lineHeight": "16px",
+    }
+    header_style = {
+        "backgroundColor": "#865D36",
+        "color": "#FFF8EF",
+        "fontWeight": "bold",
+        "textAlign": "center",
+    }
+    table_options = {
+        "style_table": table_style, "style_header": header_style,
+        "style_data_conditional": [{"if": {"row_index": "odd"}, "backgroundColor": "#AC8968"}],
+    }
+    first_display = next(iter(displays.values()), make_display(empty_frames))
+    contract_display = first_display[["Contract"]].copy()
+    contract_display["Contract"] = contract_display["Contract"].map(
+        format_contract_label
+    )
+    contract_table = html.Div(
+        [
+            html.H4(
+                "Contract",
+                style={
+                    "color": "#FFF8EF",
+                    "height": "22px",
+                    "lineHeight": "22px",
+                    "margin": "0",
+                },
+            ),
+            dash_table.DataTable(
+                id={"type": "contract-table", "product": "contracts"},
+                data=contract_display.to_dict("records"),
+                columns=[{"name": "Contract", "id": "Contract"}],
+                style_cell={
+                    **cell_style,
+                    "minWidth": "128px",
+                    "width": "128px",
+                    "maxWidth": "128px",
+                    "fontSize": "16px",
+                    "fontWeight": "bold",
+                    "lineHeight": "22px",
+                },
+                **table_options,
+            ),
+        ],
+        id="contract-labels",
+        style={"flex": "0 0 auto"},
+    )
+    product_tables = []
+    for product, display in displays.items():
+        product_tables.append(
+            html.Div(
+                [
+                    html.H4(
+                        [
+                            html.Span(product),
+                            dcc.Input(
+                                id={"type": "rank-years", "product": product},
+                                type="number",
+                                value=rank_years[product],
+                                min=2,
+                                step=1,
+                                debounce=True,
+                                persistence=True,
+                                persistence_type="local",
+                                className="product-rank-years",
+                            ),
+                            html.Button(
+                                "Analyse",
+                                id={"type": "rank-apply", "product": product},
+                                n_clicks=0,
+                                className="product-rank-apply",
+                            ),
+                        ],
+                        style={
+                            "color": "#FFF8EF",
+                            "height": "22px",
+                            "lineHeight": "22px",
+                            "margin": "0",
+                            "display": "flex",
+                            "alignItems": "center",
+                            "gap": "4px",
+                        },
+                    ),
+                    dash_table.DataTable(
+                        id={"type": "contracts-table", "product": product},
+                        data=display.drop(columns=["Contract"]).to_dict("records"),
+                        columns=[
+                            {"name": column, "id": column, "presentation": "markdown"}
+                            for column in display.columns
+                            if column != "Contract"
+                        ],
+                        markdown_options={"html": True},
+                        style_cell=cell_style,
+                        **table_options,
+                    ),
+                ],
+                id=f"product-table-{product}",
+                style={"flex": "0 0 auto"},
+            )
+        )
+    return html.Div(
+        [contract_table, *product_tables],
+        style={
+            "display": "flex",
+            "gap": "8px",
+            "alignItems": "flex-start",
+            "overflowX": "auto",
+            "paddingBottom": "12px",
+        },
+    )
+
 
 @app.callback(
-    Output("contracts-table", "columns"),
+    Output("product-tables", "children"),
     Input("column-selector", "value"),
-)
-def select_columns(selected):
-    selected = set(selected or [])
-    visible = ["Contract", *[column for column in columns if column in selected]]
-    return [{"name": column, "id": column, "presentation": "markdown"}
-            for column in visible]
-
-@app.callback(
-    Output("contracts-table", "style_data_conditional"),
-    Input("slope-threshold", "value"),
-    Input("zscore-threshold", "value"),
-    Input("highlight-selector", "value"),
     Input("data-version", "data"),
+    Input("product-selector", "value"),
+    Input("apply-parameters", "n_clicks"),
+    State("product-year-preferences", "data"),
+    State({"type": "rank-years", "product": ALL}, "value"),
+    State({"type": "rank-years", "product": ALL}, "id"),
 )
-def highlight_cells(slope_threshold, zscore_threshold, selected, _):
-    styles = [
-        {"if": {"row_index": "even"}, "background": "#111827"},
-        {"if": {"row_index": "odd"}, "background": "#151f30"},
-    ]
-    with state_lock:
-        slopes = dashboard_state["slopes"].copy()
-        zscores = dashboard_state["zscores"].copy()
-        aman = dashboard_state["aman"].copy()
+def update_table_columns(selected, _, selected_products, __, saved_years, values, ids):
     selected = set(selected or [])
-    for row in range(len(slopes)):
-        for column in columns:
-            colors = []
-            slope, zscore, signal = (slopes.at[row, column], zscores.at[row, column],
-                                     aman.at[row, column])
-            if ("slope" in selected and slope_threshold is not None
-                    and pd.notna(slope) and abs(slope) > abs(float(slope_threshold))):
-                colors.append("#6b4f1d")
-            if ("zscore" in selected and zscore_threshold is not None
-                    and pd.notna(zscore) and abs(zscore) > abs(float(zscore_threshold))):
-                colors.append("#164e63")
-            if "aman" in selected and signal in {"LONG", "SHORT"}:
-                colors.append("#14532d" if signal == "LONG" else "#7f1d1d")
-            if colors:
-                stops = 100 / len(colors)
-                gradient = ", ".join(
-                    f"{color} {index * stops:.0f}% {(index + 1) * stops:.0f}%"
-                    for index, color in enumerate(colors)
-                )
-                styles.append({"if": {"row_index": row, "column_id": column},
-                               "background": f"linear-gradient(135deg, {gradient})"})
-    return styles
+    with state_lock:
+        displays = dashboard_state["displays"]
+        filtered = {}
+        for product, display in displays.items():
+            filtered[product] = display[
+                ["Contract", *[column for column in columns if column in selected]]
+            ]
+    if ctx.triggered_id != "data-version":
+        rank_years = build_rank_years(list(filtered), values, ids, saved_years)
+        return render_tables(filtered, rank_years)
+
+    with state_lock:
+        updated_symbols = set(dashboard_state.get("updated_symbols", []))
+    if not updated_symbols:
+        return no_update
+
+    patch = Patch()
+    for index, (product, display) in enumerate(filtered.items(), 1):
+        if product in updated_symbols:
+            patch["children"][index]["children"][1]["data"] = (
+                display.drop(columns=["Contract"]).to_dict("records")
+            )
+    return patch
 
 @app.callback(
     Output("seasonality-chart", "figure"),
     Output("chart-modal", "style"),
     Output("selected-cell", "data"),
-    Input("contracts-table", "active_cell"),
+    Input(
+        {"type": "contracts-table", "product": ALL},
+        "active_cell",
+        allow_optional=True,
+    ),
     Input("close-modal", "n_clicks"),
     Input("modal-backdrop", "n_clicks"),
-    Input("live-chart-refresh", "n_intervals"),
-    State("selected-cell", "data"), State('seasonality-chart', "figure"),
+    State("selected-cell", "data"),
     prevent_initial_call=True,
 )
-@preserve_live_charts([0])
-def toggle_chart(cell, _, __, ___, selected_cell):
+def toggle_chart(cells, close_clicks, backdrop_clicks, selected_cell):
     hidden = {"display": "none"}
-    if ctx.triggered_id in {"close-modal", "modal-backdrop"}:
-        return go.Figure(), hidden, None
-    if ctx.triggered_id == "live-chart-refresh":
-        if not selected_cell:
-            return no_update, no_update, no_update
-        expression = selected_cell["expression"]
-        symbol = selected_cell["symbol"]
-        years = selected_cell["years"]
-        db = MarketData()
-        try:
-            result = Seasonality(db).working_day_expression_seasonality(
-                symbol, expression, min(years), max(years),
-                selected_cell.get("window_days", 400),
-            )
-        finally:
-            db.close()
-        return plotter.build_seasonality_figure(
-            result, expression, height=610
-        ), no_update, no_update
+    trigger = ctx.triggered_id
+    if trigger == "close-modal" or trigger == "modal-backdrop":
+        cleared = {"active_cell": None, "selected_cells": []}
+        for item in ctx.inputs_list[0]:
+            set_props(item["id"], cleared)
+        set_props({"type": "contract-table", "product": "contracts"}, cleared)
+        return no_update, hidden, None
+    if not isinstance(trigger, dict):
+        return no_update, no_update, no_update
+    # One callback owns the shared popup, regardless of how many tables exist.
+    cell = next(
+        (cell for item, cell in zip(ctx.inputs_list[0], cells or [])
+         if item["id"] == trigger),
+        None,
+    )
     if not cell or cell["column_id"] == "Contract":
         return go.Figure(), hidden, None
     with state_lock:
-        display = dashboard_state["display"].copy()
         results = dashboard_state["results"].copy()
-        symbol = dashboard_state["symbol"]
+        symbol = trigger["product"]
+        display = dashboard_state["displays"][symbol].copy()
     contract = display.iloc[cell["row"]]["Contract"]
     expression = universe["contracts"][contract][cell["column_id"]]
-    result = results.get(expression)
+    result = results.get((symbol, expression))
     if result is None:
         return go.Figure(), hidden, None
-    modal = {"display": "flex", "position": "fixed", "inset": "0", "zIndex": "1000",
-             "backgroundColor": "rgba(0,0,0,0.75)", "alignItems": "center",
-             "justifyContent": "center"}
+    modal = {
+        "display": "flex",
+        "position": "fixed",
+        "inset": "0",
+        "zIndex": "999",
+        "alignItems": "center",
+        "justifyContent": "center",
+    }
     return (plotter.build_seasonality_figure(result, expression, height=610), modal,
             {"contract": contract, "strategy": cell["column_id"],
              "expression": expression, "symbol": symbol,
@@ -471,10 +698,10 @@ def toggle_chart(cell, _, __, ___, selected_cell):
 @app.callback(
     Output("rollover-chart", "figure"),
     Input("selected-cell", "data"),
-    Input("live-chart-refresh", "n_intervals"), State('rollover-chart', "figure"),
+    State('rollover-chart', "figure"),
 )
 @preserve_live_charts([0])
-def update_rollover(selection, _):
+def update_rollover(selection):
     if not selection:
         return go.Figure()
     db = MarketData()
@@ -491,10 +718,10 @@ def update_rollover(selection, _):
 @app.callback(
     Output("forward-curve-chart", "figure"),
     Input("selected-cell", "data"),
-    Input("live-chart-refresh", "n_intervals"), State('forward-curve-chart', "figure"),
+    State('forward-curve-chart', "figure"),
 )
 @preserve_live_charts([0])
-def update_forward_curve(selection, _):
+def update_forward_curve(selection):
     if not selection:
         return go.Figure()
     curve = ForwardCurve()
@@ -507,3 +734,88 @@ def update_forward_curve(selection, _):
     return plotter.build_forward_curve_figure(
         result, selection["symbol"], selection["expression"], height=610
     )
+
+
+app.clientside_callback(
+    """
+    function(updates) {
+        if (!updates) {
+            return window.dash_clientside.no_update;
+        }
+        Object.keys(updates).forEach(function(product) {
+            var table = document.getElementById("product-table-" + product);
+            if (!table) {
+                return;
+            }
+            Object.keys(updates[product]).forEach(function(column) {
+                var values = updates[product][column];
+                values.forEach(function(value, row) {
+                    var cell = table.querySelector(
+                        '[data-dash-row="' + row +
+                        '"][data-dash-column="' + column + '"]'
+                    );
+                    if (!cell) {
+                        return;
+                    }
+                    // Keep Dash's markdown wrapper and its layout styles.
+                    var content = cell.querySelector(".dash-cell-value");
+                    if (!content) {
+                        return;
+                    }
+                    var incoming = document.createElement("div");
+                    incoming.innerHTML = value;
+                    var currentMarket = content.querySelector(".market-cell");
+                    var nextMarket = incoming.querySelector(".market-cell");
+                    if (currentMarket && nextMarket) {
+                        [".market-live", ".market-change"].forEach(function(selector) {
+                            var current = currentMarket.querySelector(selector);
+                            var next = nextMarket.querySelector(selector);
+                            if (current.innerHTML !== next.innerHTML) {
+                                current.innerHTML = next.innerHTML;
+                            }
+                            if (current.style.color !== next.style.color) {
+                                current.style.color = next.style.color;
+                            }
+                        });
+                    } else if (content.innerHTML !== incoming.innerHTML) {
+                        content.innerHTML = incoming.innerHTML;
+                    }
+                });
+            });
+        });
+        return Date.now();
+    }
+    """,
+    Output("live-cell-update-ack", "data"),
+    Input("live-cell-updates", "data"),
+)
+
+
+app.clientside_callback(
+    """
+    function(values, ids, saved) {
+        var preferences = Object.assign({}, saved || {});
+        var changed = false;
+        (ids || []).forEach(function(id, index) {
+            var value = (values || [])[index];
+            if (typeof value !== "number" || !Number.isFinite(value)) {
+                return;
+            }
+            var years = Math.max(2, Math.trunc(value));
+            if (preferences[id.product] !== years) {
+                preferences[id.product] = years;
+                changed = true;
+            }
+        });
+        return changed ? preferences : window.dash_clientside.no_update;
+    }
+    """,
+    Output("product-year-preferences", "data"),
+    Input({"type": "rank-years", "product": ALL}, "value"),
+    State({"type": "rank-years", "product": ALL}, "id"),
+    State("product-year-preferences", "data"),
+)
+
+
+register_minute_chart_callbacks(app)
+register_bookmark_ranges(app, universe, format_contract_label)

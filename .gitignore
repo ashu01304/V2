@@ -41,7 +41,9 @@ __pycache__/
 *.duckdb.*
 
 # Local datasets, generated data, logs, and sync files
-/data/
+/data/*
+!/data/expiry_dates.csv
+!/data/contract_universe_config.json
 
 # Generated reports and local analysis outputs
 MASTER_BUTTERFLY_CHECK.xlsx

@@ -79,19 +79,20 @@ def load_config(path=DEFAULT_CONFIG_PATH) -> UniverseConfig:
 
 def latest_market_date(database_path=DATABASE_PATH) -> date | None:
     """Return the latest settlement date without modifying the database."""
-    import duckdb
+    from market_data.queries import MarketData
 
     path = Path(database_path)
     if not path.exists():
         return None
-    connection = duckdb.connect(str(path), read_only=True)
+    database = MarketData(path)
+    connection = database.connection
     try:
         row = connection.execute(
             "SELECT MAX(trading_date) FROM seac_settlements"
         ).fetchone()
         return row[0] if row and row[0] else None
     finally:
-        connection.close()
+        database.close()
 
 
 def load_expiries(symbol, path=DEFAULT_EXPIRY_PATH) -> list[tuple[str, date]]:
