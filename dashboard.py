@@ -9,6 +9,7 @@ from dash import (
 )
 
 from market_data.chart_updates import preserve_live_charts
+from market_data.queries import database_signature
 from market_data import LiveMarketDataClient, MarketData
 from requests import RequestException
 from analysis.expression import parse_expression
@@ -74,6 +75,11 @@ def expression_metrics(sznlty, symbol, expression, rank_years):
         for coefficient, code in legs
     )
     value = float(live.iloc[-1])
+    result["dashboard_context"] = {
+        "year": current_year, "settlement": float(settlement),
+        "last_settlement": common.max(), "expiry": expiry,
+        "window_days": max(400, required + 10),
+    }
     return (value, value - float(settlement)), result
 
 
@@ -114,14 +120,21 @@ def calculate_dashboard(
     universe, selected_columns, symbols, rank_years, job_id, live_refresh=False,
 ):
     log_dashboard(f"job {job_id} started ({'live refresh' if live_refresh else 'analysis'})")
-    db = MarketData()
+    db = None
+    live = LiveMarketDataClient()
     try:
-        sznlty = Seasonality(db)
+        signature = database_signature()
+        cache_version = (tuple(signature) if signature is not None else None,
+                         pd.Timestamp.now(tz="UTC").date())
         with state_lock:
+            if job_id != dashboard_state["job_id"]:
+                return
+            if dashboard_state.get("cache_version") != cache_version:
+                dashboard_state["cache"] = {}
+                dashboard_state["cache_version"] = cache_version
             frames = {symbol: product_frames(symbol) for symbol in symbols}
             results = {key: value for key, value in dashboard_state["results"].items()
                        if key[0] in symbols}
-            dashboard_state["settlement_date"] = latest_settlement_date(db)
         for symbol in symbols:
             for row, strategies in enumerate(universe["contracts"].values()):
                 for strategy in selected_columns:
@@ -132,12 +145,35 @@ def calculate_dashboard(
                             return
                         cached = dashboard_state["cache"].get(cache_key)
                     if cached is None:
+                        if db is None:
+                            db = MarketData()
+                            sznlty = Seasonality(db, live=live)
+                            settlement = latest_settlement_date(db)
+                            with state_lock:
+                                if job_id != dashboard_state["job_id"]:
+                                    return
+                                dashboard_state["settlement_date"] = settlement
                         cached = expression_metrics(
                             sznlty, symbol, expression, rank_years[symbol],
                         )
-                        with state_lock:
-                            dashboard_state["cache"][cache_key] = cached
                     metrics, result = cached
+                    if result is not None:
+                        context = result["dashboard_context"]
+                        try:
+                            quote = live.expression(symbol, expression)
+                        except (RequestException, KeyError, ValueError, TypeError):
+                            quote = None
+                        updated = Seasonality.refresh_live_result(
+                            result, context["year"], quote, context["last_settlement"],
+                            context["expiry"], context["window_days"],
+                        )
+                        if updated is not result:
+                            value = float(updated["series"][context["year"]]["value"].iloc[-1])
+                            metrics, result = (value, value - context["settlement"]), updated
+                    with state_lock:
+                        if job_id != dashboard_state["job_id"]:
+                            return
+                        dashboard_state["cache"][cache_key] = (metrics, result)
                     if metrics is None:
                         continue
                     value, change = metrics
@@ -154,7 +190,9 @@ def calculate_dashboard(
         log_dashboard(f"job {job_id} failed")
         raise
     finally:
-        db.close()
+        if db is not None:
+            db.close()
+        live.close()
     with state_lock:
         if job_id == dashboard_state["job_id"]:
             dashboard_state["processing"] = False
@@ -363,11 +401,6 @@ def start_dashboard_job(symbols, selected, live_refresh):
         if live_refresh:
             if dashboard_state["processing"]:
                 return None
-            dashboard_state["cache"] = {
-                key: value
-                for key, value in dashboard_state["cache"].items()
-                if key[0] not in symbols
-            }
 
         job_id = dashboard_state["job_id"] + 1
         frames = {symbol: product_frames(symbol) for symbol in symbols}

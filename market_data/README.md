@@ -65,6 +65,13 @@ missing near-decade observation. Without a calendar match, ambiguous codes are
 skipped rather than guessed.
 Larger chart candles aggregate these minute prices, not every underlying tick.
 
+Main table analysis is cached by product, expression, and selected years. Ordinary
+10-second refreshes reuse settlement baselines and historical-year series, request
+live expression quotes, and replace the current live point without opening a
+master-database connection. Database publications and UTC date changes invalidate
+that cache; changed year selections load the appropriate analysis. If the live
+service is unavailable, the last cached values remain visible until recovery.
+
 Open main-dashboard minute charts check the master file signature on their live
 refresh timer. They reload history only after a database publication; ordinary
 ticks update the live markers without querying minute history. Closed popups

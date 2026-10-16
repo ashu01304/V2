@@ -98,6 +98,43 @@ class Seasonality:
 
         return self._package_working_days(series_out, warnings, window_days)
 
+    @staticmethod
+    def refresh_live_result(result, year, quote, last_settlement, expiry, window_days):
+        """Replace only the current live point using cached history and a quote."""
+        if not quote or year not in result.get("series", {}):
+            return result
+        try:
+            value = float(quote["value"])
+            day = pd.Timestamp(quote["timestamp"])
+            if pd.isna(day) or not np.isfinite(value) or value == -100:
+                return result
+            day = day.tz_localize(None).normalize()
+            if not pd.Timestamp(last_settlement) < day <= pd.Timestamp(expiry):
+                return result
+            offset = -int(np.busday_count(day.date(), pd.Timestamp(expiry).date()))
+            if not -window_days <= offset <= 0:
+                return result
+        except (KeyError, ValueError, TypeError, OverflowError):
+            return result
+        current = result["series"][year]
+        previous = current[current["is_live"]] if "is_live" in current else current.iloc[:0]
+        if not previous.empty:
+            latest = previous.iloc[-1]
+            if day < pd.Timestamp(latest["date"]):
+                return result
+            if day == pd.Timestamp(latest["date"]) and value == float(latest["value"]):
+                return result
+        current = current.loc[~current["is_live"]] if "is_live" in current else current
+        point = pd.DataFrame({"value": [value], "date": [day], "is_live": [True]}, index=[offset])
+        current = pd.concat([current, point]).sort_index()
+        series = {**result["series"], year: current}
+        # Reuse every historical-year series; only the current column changes.
+        raw = result.get("raw_combined", result["combined"]).drop(columns=[year])
+        raw = raw.join(current["value"].rename(year), how="outer").sort_index().dropna(how="all")
+        raw = raw.reindex(columns=result["combined"].columns)
+        return {**result, "series": series, "raw_combined": raw,
+                "combined": raw.interpolate(method="linear", limit_area="inside")}
+
     def _live_daily_overlay(self, symbol, expression, year_shift,
                             last_settlement_date, expiry):
         """Append one newest minute-derived value to the latest plotted year."""
