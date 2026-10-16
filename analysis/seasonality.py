@@ -11,12 +11,8 @@ class Seasonality:
         self.official_expiry = OfficialExpiryLookup()
 
     def _contract_years(self, symbol, letter, start_year, end_year=None):
-        query_symbol = "CL" if symbol == "CL-CO" else symbol
-        self.db.cursor.execute(
-            "SELECT DISTINCT contract_code FROM seac_settlements WHERE symbol = ? AND contract_code LIKE ?",
-            (query_symbol, f"{letter}%")
-        )
-        years = sorted({2000 + int(code[1:]) for code, in self.db.cursor.fetchall()})
+        years = sorted({2000 + int(code[1:])
+                        for code in self.db.contract_codes(symbol, f"{letter}%")})
         years = [year for year in years if year >= start_year]
         if end_year is not None:
             years = [year for year in years if year <= end_year]

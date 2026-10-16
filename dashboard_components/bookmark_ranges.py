@@ -9,11 +9,10 @@ import pandas as pd
 from flask import jsonify, request
 from requests import RequestException
 
-from analysis.intraday_chart import price_recipe
-from analysis.session_overlay import SESSION_TIMEZONE, session_window
+from market_data.intraday import SESSION_TIMEZONE, session_window
 from market_data import MarketData
-from market_data.config import DATABASE_PATH
-from dashboard_components.minute_charts import fetch_live_quote
+from market_data.queries import database_signature
+from market_data.live_client import fetch_live_quote
 
 
 class BookmarkRanges:
@@ -34,8 +33,9 @@ class BookmarkRanges:
         with self.lock:
             if self.session != start:
                 self.session, self.history, self.observed = start, {}, {}
-            stat = DATABASE_PATH.stat()
-            signature = (stat.st_mtime_ns, stat.st_size)
+            signature = database_signature()
+            if signature is None:
+                return {}
             if self.signature != signature:
                 self.signature, self.history = signature, {}
             missing = [item for item in selections if item[0] not in self.history]
@@ -68,29 +68,11 @@ class BookmarkRanges:
 
     @staticmethod
     def load_ranges(selections, start, end):
-        recipes, parameters = [], []
-        for index, (_, product, expression) in enumerate(selections):
-            recipe = price_recipe(product, expression)
-            for instrument, weight in recipe.items():
-                recipes.append("(?, ?, ?, ?)")
-                parameters.extend((index, instrument, weight, len(recipe)))
         db = MarketData()
         try:
-            rows = db.connection.execute(f"""
-                WITH recipe(cell, instrument, weight, legs) AS (VALUES {", ".join(recipes)}),
-                minutes AS (
-                    SELECT r.cell, p.timestamp, SUM(p.price * r.weight) AS price
-                    FROM spread_prices p JOIN recipe r USING (instrument)
-                    WHERE p.timestamp >= ? AND p.timestamp <= ? AND isfinite(p.price)
-                    GROUP BY r.cell, p.timestamp
-                    HAVING COUNT(DISTINCT p.instrument) = MAX(r.legs)
-                )
-                SELECT cell, MIN(price), MAX(price) FROM minutes GROUP BY cell
-            """, [*parameters, start.to_pydatetime(), end.to_pydatetime()]).fetchall()
+            return db.expression_ranges(selections, start.to_pydatetime(), end.to_pydatetime())
         finally:
             db.close()
-        bounds = {selections[index][0]: (low, high) for index, low, high in rows}
-        return {key: bounds.get(key) for key, _, _ in selections}
 
 
 def register_bookmark_ranges(app, universe, format_contract_label):

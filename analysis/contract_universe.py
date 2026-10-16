@@ -12,7 +12,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from market_data.config import DATABASE_PATH, DATA_DIR
+from market_data.config import DATA_DIR
+from market_data.queries import MarketData, database_status
 
 
 DEFAULT_CONFIG_PATH = DATA_DIR / "contract_universe_config.json"
@@ -77,20 +78,13 @@ def load_config(path=DEFAULT_CONFIG_PATH) -> UniverseConfig:
     return config
 
 
-def latest_market_date(database_path=DATABASE_PATH) -> date | None:
+def latest_market_date(database_path=None) -> date | None:
     """Return the latest settlement date without modifying the database."""
-    from market_data.queries import MarketData
-
-    path = Path(database_path)
-    if not path.exists():
+    if database_status(database_path) is None:
         return None
-    database = MarketData(path)
-    connection = database.connection
+    database = MarketData() if database_path is None else MarketData(database_path)
     try:
-        row = connection.execute(
-            "SELECT MAX(trading_date) FROM seac_settlements"
-        ).fetchone()
-        return row[0] if row and row[0] else None
+        return database.latest_settlement_date()
     finally:
         database.close()
 

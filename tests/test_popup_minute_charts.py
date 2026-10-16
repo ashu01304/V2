@@ -65,7 +65,7 @@ class PopupMinuteChartTests(unittest.TestCase):
     def test_no_fetch_without_a_selected_cell_including_control_changes(self):
         with patch.object(charts, "load_candles") as candles, \
              patch.object(charts, "load_session_minutes") as minutes, \
-             patch.object(charts, "LiveMarketDataClient") as live:
+             patch("market_data.live_client.LiveMarketDataClient") as live:
             response = self.request("popup-candle-chart.figure", [
                 ("selected-cell", "data", None), ("popup-candle-timeframe", "value", 30),
             ], "popup-candle-timeframe.value")
@@ -87,7 +87,7 @@ class PopupMinuteChartTests(unittest.TestCase):
         client.expression.return_value = None
         with patch.object(charts, "load_candles", return_value=self.candles) as candles, \
              patch.object(charts, "load_session_minutes") as minutes, \
-             patch.object(charts, "LiveMarketDataClient", return_value=client):
+             patch("market_data.live_client.LiveMarketDataClient", return_value=client):
             response = self.request("popup-candle-chart.figure", [
                 ("selected-cell", "data", self.selection), ("popup-candle-timeframe", "value", 15),
             ], "selected-cell.data")
@@ -129,6 +129,30 @@ class PopupMinuteChartTests(unittest.TestCase):
             self.assertTrue(zero.data[0].connectgaps)
             candles.assert_not_called()
             minutes.assert_not_called()
+
+    def test_candle_prices_and_refreshing_live_dots_use_product_precision(self):
+        candles = pd.DataFrame(
+            {"open": [1.23456], "high": [1.23986], "low": [1.22123], "close": [1.23876]},
+            index=self.minutes.index[:1],
+        )
+        original = candles.copy(deep=True)
+        quote = {"timestamp": "2026-10-14T22:02:30Z", "value": 1.23766}
+        for product, decimals in [("CL-CO", 2), ("NG", 3), ("OTHER", 3)]:
+            figure = charts.make_intraday_figure(candles, product, "Z26-F27", live_quote=quote)
+            for field in ["open", "high", "low", "close"]:
+                self.assertAlmostEqual(getattr(figure.data[0], field)[0],
+                                       candles[field].round(decimals).iloc[0])
+            self.assertAlmostEqual(figure.data[-1].y[0], round(quote["value"], decimals))
+        pd.testing.assert_frame_equal(candles, original)
+        data = {"selection": self.selection, "past_days": 8,
+                "timestamps": [t.isoformat() for t in self.minutes.index],
+                "prices": self.minutes.price.tolist()}
+        overlay = charts.update_overlay_chart(data, ["yes"]).to_plotly_json()
+        with patch.object(charts, "fetch_live_quote", return_value=quote):
+            payload, _ = charts.refresh_minute_live_markers(
+                1, self.selection, data, ["yes"], {"data": [{"type": "candlestick"}]}, overlay)
+        self.assertEqual(payload["candle"]["y"], [1.24])
+        self.assertEqual(payload["overlay"]["y"], [.24])
 
     def test_live_timer_returns_only_marker_data_without_history_queries(self):
         data = {"selection": self.selection, "timestamps": [t.isoformat() for t in self.minutes.index],
@@ -173,7 +197,7 @@ class PopupMinuteChartTests(unittest.TestCase):
         import json
         stat = Mock(st_mtime_ns=1792082335894253001, st_size=1237594112,
                     st_ino=987654321012345678)
-        with patch.object(charts, "DATABASE_PATH") as path:
+        with patch("market_data.queries.DATABASE_PATH") as path:
             path.stat.return_value = stat
             signature = charts.database_signature()
         # Simulate JavaScript Number rounding when a JSON integer exceeds 2**53.

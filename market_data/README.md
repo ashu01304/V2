@@ -32,20 +32,6 @@ python main.py
 
 Open http://127.0.0.1:8050 in your browser.
 
-To open the central dashboard manager from the project root, run:
-
-```powershell
-python run_all.py
-```
-
-Open http://127.0.0.1:8070. The manager shows each configured dashboard's
-status and provides Start, Stop, and Open controls. Use the Add dashboard
-fields to register another Python file; its configuration is saved in
-`data/dashboard_manager.json`. If the file accepts a `--port` argument, tick
-`pass --port` when adding it. Press Ctrl+C in the launcher terminal to stop the
-manager and its child processes. Each row also displays the latest 30 lines
-from that dashboard's terminal output, including errors from stderr.
-
 ## Running the live market-data service
 
 From the project root, start the service with every product currently stored in
@@ -274,3 +260,48 @@ store the raw symbol and apply an explicit reference-year rule.
 - Keep free disk space for one working master copy during publication and the
   per-process reader snapshots. A live publication creates a new master version
   at most every 10 minutes, plus a final attempt during graceful shutdown.
+
+## Code responsibilities and regression checks
+
+- market_data/queries.py is the read-only master database interface. It owns all
+  read SQL, including product/contract lists, settlement snapshots, matching-minute
+  expression prices, bounded candle aggregation, and batched expression ranges.
+  database_status() and database_signature() expose file status without opening SQL
+  connections or copying snapshots; dashboards use them for update labels and caches.
+- market_data/database.py is the master writer interface. Historical imports and
+  live-minute publication use its named methods; writer metadata queries stay here.
+- market_data/intraday.py handles session windows and convenient reader lifetimes,
+  delegating data requests to MarketData.
+- market_data/contracts.py owns expression-to-spread recipes.
+- market_data/live_client.py owns live-price requests and optional quote fetching.
+- analysis/intraday_chart.py and analysis/session_overlay.py build reusable figures.
+- dashboard_components/ owns Dash layout, callbacks, browser stores, and endpoints.
+- tests/ contains automated regression checks. testing/ contains the older
+  interactive range-testing app, which still requires the removed product_config.py.
+  The retained backtesting execution chain also requires the removed feature module.
+
+Run regression checks from the project root:
+
+~~~powershell
+.\.venv\Scripts\python.exe -B -m unittest discover -s tests -p "test_*.py"
+node tests/bookmark_indicator_check.js
+node tests/live_marker_check.js
+~~~
+
+## Database access boundary
+
+Application code should call named methods on MarketData or MasterDatabase rather
+than access a DuckDB connection or cursor. Both interfaces keep their connections
+private. Examples: symbols(), contract_codes(), latest_settlement_date(),
+settlements_on(), expression_minutes(), expression_candles(), expression_ranges(),
+save_spreads(), save_settlements(), and save_live_spreads().
+
+Dashboard and analysis modules do not import DATABASE_PATH or inspect the master
+file directly. Use database_status() for its UTC update time or existence and
+database_signature() for cache invalidation. Signatures contain strings so browser
+number rounding cannot trigger repeated history reloads.
+
+Database copying, publication locks, and reader snapshots remain internal to
+market_data; updater orchestration coordinates these helpers and the writer.
+The live recorder's private SQLite spool is separate from the master DuckDB file;
+its buffer SQL remains internal to live_history.py.

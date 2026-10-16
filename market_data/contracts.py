@@ -1,5 +1,6 @@
 """Build zero-sum synthetic contracts entirely from stored spread prices."""
 
+from collections import defaultdict
 import re
 
 import pandas as pd
@@ -51,6 +52,21 @@ def spread_recipe(product, expression):
         first = _stored_contract_code(product, legs[index][1])
         second = _stored_contract_code(product, legs[index + 1][1])
         recipe.append((cumulative, f"{product}{first}-{second}"))
+    return recipe
+
+
+def price_recipe(product, expression):
+    weights = defaultdict(float)
+    products = [("CL", 1), ("LCO", -1)] if product == "CL-CO" else [
+        ("LCO" if product == "CO" else product, 1)
+    ]
+    for stored_product, sign in products:
+        for weight, instrument in spread_recipe(stored_product, expression):
+            weights[instrument] += sign * weight
+    recipe = {instrument: weight for instrument, weight in weights.items()
+              if abs(weight) > 1e-10}
+    if not recipe:
+        raise ValueError("The expression has no non-zero spread legs.")
     return recipe
 
 

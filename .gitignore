@@ -60,3 +60,6 @@ combinations.json
 /Mini_Tools/expression_creator.py
 /Mini_Tools/raw_expression.py
 /Mini_Tools/expression_true.py
+
+# Separate Tools repository
+/Tools/

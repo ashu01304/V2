@@ -175,8 +175,7 @@ class LiveMinuteRecorder:
                 shutil.copy2(self.database_path, temporary)
                 database = MasterDatabase(temporary)
                 try:
-                    instruments = [row[0] for row in database.connection.execute(
-                        "SELECT instrument FROM spread_instruments").fetchall()]
+                    instruments = database.registered_spreads()
                     frame = spread_closes(records, instruments, load_contract_expiries())
                     accepted = database.save_live_spreads(frame)
                     if accepted:

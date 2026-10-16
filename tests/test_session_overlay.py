@@ -1,6 +1,6 @@
 """Trading-session alignment, gap handling and zero-base regression checks."""
 
-from types import SimpleNamespace
+from tests.helpers import memory_reader
 import unittest
 from unittest.mock import patch
 
@@ -8,8 +8,9 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+from market_data.intraday import load_session_minutes, session_window
 from analysis.session_overlay import (
-    load_session_minutes, make_session_overlay, session_lines, session_window,
+    make_session_overlay, session_lines,
 )
 
 
@@ -57,6 +58,28 @@ class SessionOverlayTests(unittest.TestCase):
         ]:
             self.assertEqual(len(make_session_overlay(
                 self.minutes, "CL", "Z26", live_quote=invalid).data), 2)
+
+    def test_actual_points_and_live_dot_follow_product_precision_without_changing_source(self):
+        minutes = pd.DataFrame(
+            {"price": [-.0144, -.0258, -.0356]},
+            index=pd.date_range("2026-10-14T22:00Z", periods=3, freq="min"),
+        )
+        original = minutes.copy(deep=True)
+        quote = {"timestamp": "2026-10-14T22:02:30Z", "value": -.0152}
+        for product in ["CL", "CO", "CL-CO", "NG", "OTHER"]:
+            decimals = 2 if product in {"CL", "CO", "CL-CO"} else 3
+            expected = minutes.price.round(decimals).to_numpy()
+            level = make_session_overlay(minutes, product, "Z26-F27", False, live_quote=quote)
+            zero = make_session_overlay(minutes, product, "Z26-F27", True, live_quote=quote)
+            np.testing.assert_allclose(level.data[0].y[:3], expected)
+            np.testing.assert_allclose(zero.data[0].y[:3], np.round(expected - expected[0], decimals))
+            live = float(np.round(quote["value"], decimals))
+            self.assertEqual(level.data[-1].y[0], live)
+            self.assertAlmostEqual(zero.data[-1].y[0], float(np.round(live - expected[0], decimals)))
+            self.assertEqual(level.data[0].customdata[0][1], expected[0])
+            self.assertTrue(np.isnan(level.data[0].y[3]))
+        pd.testing.assert_frame_equal(minutes, original)
+        self.assertEqual(quote["value"], -.0152)
 
     def test_session_trace_ids_are_stable_unique_and_safe_for_plotly_selectors(self):
         first = make_session_overlay(self.minutes, "CL-CO", "Z26-F27")
@@ -108,7 +131,7 @@ class SessionOverlayTests(unittest.TestCase):
                                [pd.Timestamp("2026-10-14T22:02Z").to_pydatetime(), "CLZ26-F27", 99])
             result = load_session_minutes(
                 "CL-CO", "Z26-F27", 2, now=pd.Timestamp("2026-10-15T12:00Z"),
-                database=SimpleNamespace(connection=connection),
+                database=memory_reader(connection),
             )
             np.testing.assert_allclose(result.price, self.minutes.price)
             self.assertEqual(len(result), len(self.minutes))

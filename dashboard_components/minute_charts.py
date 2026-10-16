@@ -1,17 +1,15 @@
 """On-demand minute charts used in the selected-cell popup."""
 
-from math import isfinite
-
 import duckdb
 import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, dcc, html, no_update
-from requests import RequestException
 
-from analysis.intraday_chart import TIMEFRAMES, load_candles, make_intraday_figure
-from analysis.session_overlay import load_session_minutes, make_session_overlay, make_session_live_trace
-from market_data.live_client import LiveMarketDataClient
-from market_data.config import DATABASE_PATH
+from analysis.intraday_chart import make_intraday_figure, make_intraday_live_trace
+from analysis.session_overlay import make_session_overlay, make_session_live_trace
+from market_data.live_client import fetch_live_quote
+from market_data.intraday import TIMEFRAMES, load_candles, load_session_minutes
+from market_data.queries import database_signature
 
 GRAPH_CONFIG = {"displaylogo": False, "displayModeBar": False, "scrollZoom": False}
 DATA_ERRORS = (ValueError, TypeError, OSError, RuntimeError, duckdb.Error)
@@ -66,27 +64,6 @@ def chart_error(message):
     figure.add_annotation(text=str(message), x=0.5, y=0.5,
                           xref="paper", yref="paper", showarrow=False)
     return figure
-
-
-def fetch_live_quote(product, expression):
-    quote = None
-    client = LiveMarketDataClient(timeout=2)
-    try:
-        quote = client.expression(product, expression)
-    except (RequestException, KeyError, ValueError, TypeError):
-        pass
-    finally:
-        client.close()
-    return quote
-
-
-def database_signature():
-    try:
-        stat = DATABASE_PATH.stat()
-        # Browser numbers lose precision above 2**53. Keep signatures exact.
-        return [str(stat.st_mtime_ns), str(stat.st_size), str(stat.st_ino)]
-    except OSError:
-        return None
 
 
 def update_candle_chart(selection, timeframe, _publication=None):
@@ -155,24 +132,7 @@ def refresh_minute_live_markers(_tick, selection, data, zero_base, candle_figure
                       and meta["minute_database_signature"] != signature)
     publication = signature if signature and (overlay_changed or candle_changed) else no_update
     quote = fetch_live_quote(selection["symbol"], selection["expression"])
-    candle_trace = go.Scatter(
-        x=[], y=[], mode="markers", name="Live price", showlegend=False,
-        uid="intraday-live",
-        cliponaxis=False,
-        marker={"size": 12, "color": "#22c55e",
-                "line": {"color": "#dcfce7", "width": 2}},
-    )
-    decimals = 2 if selection["symbol"] in {"CL", "CO", "CL-CO"} else 3
-    candle_trace.hovertemplate = (f"%{{x|%Y-%m-%d %H:%M:%S}} UTC"
-                                  f"<br>Live: %{{y:.{decimals}f}}<extra></extra>")
-    if quote:
-        try:
-            timestamp = pd.to_datetime(quote["timestamp"], utc=True)
-            price = float(quote["value"])
-            if timestamp.dayofweek < 5 and isfinite(price):
-                candle_trace.x, candle_trace.y = [timestamp], [price]
-        except (KeyError, TypeError, ValueError, OverflowError):
-            pass
+    candle_trace = make_intraday_live_trace(selection["symbol"], quote)
     payload = {
         "selection": selection, "zero_base": bool(zero_base),
         "candle": candle_trace.to_plotly_json() if (candle_figure or {}).get("data") else None,

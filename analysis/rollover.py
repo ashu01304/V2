@@ -14,11 +14,7 @@ class StrategyRollover:
 
     def calculate(self, symbol, expression, periods=6):
         series, warnings = {}, []
-        query_symbol = "CL" if symbol == "CL-CO" else symbol
-        self.db.cursor.execute(
-            "SELECT MAX(trading_date) FROM seac_settlements WHERE symbol = ?", (query_symbol,)
-        )
-        latest_market_date = pd.Timestamp(self.db.cursor.fetchone()[0]).normalize()
+        latest_market_date = pd.Timestamp(self.db.latest_settlement_date(symbol)).normalize()
         self.latest_market_date = latest_market_date
         ordered = self._contract_sequence(symbol)
         position = {contract: index for index, (_, contract) in enumerate(ordered)}
@@ -83,14 +79,9 @@ class StrategyRollover:
         return {"series": series, "warnings": warnings}
 
     def _contract_sequence(self, symbol):
-        query_symbol = "CL" if symbol == "CL-CO" else symbol
-        self.db.cursor.execute(
-            "SELECT DISTINCT contract_code FROM seac_settlements WHERE symbol = ?",
-            (query_symbol,)
-        )
         return sorted(
             (expiry, contract)
-            for contract, in self.db.cursor.fetchall()
+            for contract in self.db.contract_codes(symbol)
             for expiry in [self._official_expiry(symbol, contract)]
             if expiry is not None
         )
@@ -173,23 +164,17 @@ class StrategyRollover:
         return last_date
 
     def _previous_contract(self, symbol, expiry):
-        self.db.cursor.execute(
-            "SELECT DISTINCT contract_code FROM seac_settlements WHERE symbol = ?", (symbol,)
-        )
         candidates = []
-        for contract, in self.db.cursor.fetchall():
+        for contract in self.db.contract_codes(symbol):
             contract_expiry = self._official_expiry(symbol, contract)
             if contract_expiry is not None and contract_expiry < expiry:
                 candidates.append((contract_expiry, contract))
         return max(candidates)[1] if candidates else None
 
     def _previous_expression(self, symbol, expression):
-        self.db.cursor.execute(
-            "SELECT DISTINCT contract_code FROM seac_settlements WHERE symbol = ?", (symbol,)
-        )
         ordered = sorted(
             (expiry, contract)
-            for contract, in self.db.cursor.fetchall()
+            for contract in self.db.contract_codes(symbol)
             for expiry in [self._official_expiry(symbol, contract)]
             if expiry is not None
         )

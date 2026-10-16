@@ -54,3 +54,15 @@ class LiveMarketDataClient:
 
     def close(self):
         self.session.close()
+
+
+def fetch_live_quote(product, expression):
+    quote = None
+    client = LiveMarketDataClient(timeout=2)
+    try:
+        quote = client.expression(product, expression)
+    except (requests.RequestException, KeyError, ValueError, TypeError):
+        pass
+    finally:
+        client.close()
+    return quote

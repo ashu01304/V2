@@ -12,11 +12,7 @@ STRATEGIES = UNIVERSE["columns"]
 def available_contract_codes(symbol):
     database = MarketData()
     try:
-        rows = database.cursor.execute(
-            "SELECT DISTINCT contract_code FROM seac_settlements WHERE symbol = ?",
-            ["CL" if symbol == "CL-CO" else symbol],
-        ).fetchall()
-        return {code for code, in rows}
+        return set(database.contract_codes(symbol))
     finally:
         database.close()
 

@@ -78,9 +78,7 @@ def expression_metrics(sznlty, symbol, expression, rank_years):
 
 
 def latest_settlement_date(database):
-    date = database.connection.execute(
-        "SELECT MAX(trading_date) FROM seac_settlements"
-    ).fetchone()[0]
+    date = database.latest_settlement_date()
     return pd.Timestamp(date).strftime("%Y-%m-%d") if date is not None else "unavailable"
 
 
@@ -254,8 +252,7 @@ def make_display(frames, symbol=None):
 
 product_db = MarketData()
 try:
-    product_db.cursor.execute("SELECT DISTINCT symbol FROM seac_settlements ORDER BY symbol")
-    products = [row[0] for row in product_db.cursor.fetchall()]
+    products = product_db.symbols()
     settlement_date = latest_settlement_date(product_db)
     if "CL" in products and "CO" in products and "CL-CO" not in products:
         products.append("CL-CO")
