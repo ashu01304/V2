@@ -2,8 +2,9 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from math import ceil
+from math import ceil, isfinite
 from pathlib import Path
+import re
 
 import duckdb
 import pandas as pd
@@ -207,6 +208,42 @@ class MarketData:
             [*parameters, start, end, len(recipe)],
         ).fetchdf()
 
+    def expression_snapshots(self, selections, timestamps):
+        """Read exact-minute expression prices in one query, with all legs aligned."""
+        targets = []
+        for timestamp in timestamps:
+            timestamp = pd.Timestamp(timestamp)
+            if pd.isna(timestamp) or timestamp.tzinfo is None:
+                raise ValueError("Snapshot times must be timezone-aware UTC minutes.")
+            timestamp = timestamp.tz_convert("UTC")
+            if timestamp != timestamp.floor("min"):
+                raise ValueError("Snapshot times must be aligned to whole minutes.")
+            if timestamp not in targets:
+                targets.append(timestamp)
+        snapshots = {timestamp: {} for timestamp in targets}
+        if not selections or not targets:
+            return snapshots
+        recipes, parameters = [], []
+        for index, (_key, product, expression) in enumerate(selections):
+            recipe = price_recipe(product, expression)
+            for instrument, weight in recipe.items():
+                recipes.append("(?, ?, ?, ?)")
+                parameters.extend((index, instrument, weight, len(recipe)))
+        targets_sql = ", ".join("(CAST(? AS TIMESTAMPTZ))" for _ in targets)
+        rows = self._connection.execute(f"""
+            WITH recipe(cell, instrument, weight, legs) AS (VALUES {", ".join(recipes)}),
+                 targets(timestamp) AS (VALUES {targets_sql})
+            SELECT r.cell, p.timestamp, SUM(p.price * r.weight)
+            FROM spread_prices p JOIN targets t ON p.timestamp=t.timestamp
+            JOIN recipe r ON p.instrument=r.instrument
+            WHERE isfinite(p.price)
+            GROUP BY r.cell, p.timestamp
+            HAVING COUNT(DISTINCT p.instrument) = MAX(r.legs)
+        """, [*parameters, *[timestamp.to_pydatetime() for timestamp in targets]]).fetchall()
+        for index, timestamp, price in rows:
+            snapshots[pd.Timestamp(timestamp)][selections[index][0]] = float(price)
+        return snapshots
+
     def expression_ranges(self, selections, start, end):
         """Fetch multiple expressions' lows/highs in one bounded database query."""
         if not selections:
@@ -230,6 +267,85 @@ class MarketData:
         """, [*parameters, start, end]).fetchall()
         bounds = {selections[index][0]: (low, high) for index, low, high in rows}
         return {key: bounds.get(key) for key, _, _ in selections}
+
+    def calendar_filter_histograms(self, filters, start, end):
+        """Pool CL-CO month-pair histograms after simultaneous same-year minute filters.
+
+        Bounds are inclusive, prices use two decimals, and end is exclusive.
+        Each observation is a (contract year, timestamp) pair, not a unique timestamp.
+        """
+        start, end = pd.Timestamp(start), pd.Timestamp(end)
+        if start.tzinfo is None or end.tzinfo is None or start >= end:
+            raise ValueError("Choose ordered, timezone-aware start and end times.")
+        clean = {}
+        for month, (low, high) in filters.items():
+            if not isinstance(month, int) or not 1 <= month <= 12:
+                raise ValueError("Filter months must be between 1 and 12.")
+            low, high = (float(value) if value is not None else None for value in (low, high))
+            if any(value is not None and not isfinite(value) for value in (low, high)):
+                raise ValueError("Price bounds must be finite.")
+            if low is not None and high is not None and low > high:
+                raise ValueError("Minimum price cannot exceed maximum price.")
+            if low is not None or high is not None:
+                clean[month] = (low, high)
+        codes = "FGHJKMNQUVXZ"
+        recipes, parameters, seen = [], [], set()
+        for instrument in self.spreads("CL%"):
+            match = re.fullmatch(r"CL([FGHJKMNQUVXZ])(\d{2})-([FGHJKMNQUVXZ])(\d{2})", instrument)
+            if not match:
+                continue
+            first, year, second, next_year = match.groups()
+            month, year = codes.index(first) + 1, int(year)
+            if second != codes[month % 12] or int(next_year) != (year + (month == 12)) % 100:
+                continue
+            if (year, month) in seen:
+                continue
+            seen.add((year, month))
+            expression = instrument[2:]
+            recipe = price_recipe("CL-CO", expression)
+            for leg, weight in recipe.items():
+                recipes.append("(?, ?, ?, ?, ?)")
+                parameters.extend((year, month, leg, weight, len(recipe)))
+        empty = pd.DataFrame(columns=["month", "price", "frequency"])
+        if not recipes:
+            return empty, {"samples": 0, "minutes": 0, "years": 0}
+        conditions, bounds = [], []
+        for month, (low, high) in clean.items():
+            parts = ["month = ?"]
+            bounds.append(month)
+            if low is not None:
+                parts.append("price >= ?")
+                bounds.append(low)
+            if high is not None:
+                parts.append("price <= ?")
+                bounds.append(high)
+            conditions.append("(" + " AND ".join(parts) + ")")
+        qualifier = ("SELECT year, timestamp FROM minutes WHERE " + " OR ".join(conditions) +
+                     " GROUP BY year, timestamp HAVING COUNT(DISTINCT month) = ?") if clean else (
+                     "SELECT DISTINCT year, timestamp FROM minutes")
+        frame = self._connection.execute(f"""
+            WITH recipe(year, month, instrument, weight, legs) AS (VALUES {', '.join(recipes)}),
+            minutes AS (
+                SELECT r.year, r.month, p.timestamp, ROUND(SUM(p.price * r.weight), 2) AS price
+                FROM spread_prices p JOIN recipe r USING (instrument)
+                WHERE p.timestamp >= ? AND p.timestamp < ? AND isfinite(p.price)
+                GROUP BY r.year, r.month, p.timestamp
+                HAVING COUNT(DISTINCT p.instrument) = MAX(r.legs)
+            ), qualified AS ({qualifier}),
+            histogram AS (
+                SELECT m.month, m.price, COUNT(*) AS frequency FROM minutes m
+                JOIN qualified q ON m.year=q.year AND m.timestamp=q.timestamp
+                GROUP BY m.month, m.price
+            ), summary AS (
+                SELECT COUNT(*) AS samples, COUNT(DISTINCT timestamp) AS minutes,
+                       COUNT(DISTINCT year) AS years FROM qualified
+            )
+            SELECT h.*, s.* FROM summary s LEFT JOIN histogram h ON TRUE ORDER BY h.month, h.price
+        """, [*parameters, start.to_pydatetime(), end.to_pydatetime(), *bounds,
+              *([len(clean)] if clean else [])]).fetchdf()
+        stats = {key: int(frame.iloc[0][key]) for key in ("samples", "minutes", "years")}
+        histogram = frame.loc[frame.month.notna(), ["month", "price", "frequency"]].copy()
+        return histogram, stats
 
     def expression_candles(self, product, expression, timeframe=15, max_candles=MAX_CANDLES):
         """Align minute legs before OHLC aggregation; return newest weekday bars."""

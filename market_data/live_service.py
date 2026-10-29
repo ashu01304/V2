@@ -16,6 +16,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from market_data.live_history import LiveMinuteRecorder
+from market_data.config import LIVE_PRODUCTS
 
 CONTRACT_URL = "https://insight-x.corp.hertshtengroup.com/api/v1/insight/getPDSInstruments"
 ENDPOINT = "https://ls-md.corp.hertshtengroup.com"
@@ -44,7 +45,7 @@ def number(value):
 
 
 def product_name(product):
-    return {"BRN": "CO", "LCO": "CO"}.get(product.upper(), product.upper())
+    return {"BRN": "CO", "LCO": "CO", "LGO": "G"}.get(product.upper(), product.upper())
 
 
 def parse_legs(expression):
@@ -62,6 +63,10 @@ def parse_legs(expression):
 
 
 def get_instruments(products):
+    products = list(dict.fromkeys(product_name(p) for p in products))
+    unsupported = set(products) - set(LIVE_PRODUCTS)
+    if not products or unsupported:
+        raise ValueError("Live products must be selected from: " + ", ".join(LIVE_PRODUCTS))
     request = Request(CONTRACT_URL, data=json.dumps({
         "products": ["BRN" if p == "CO" else p for p in products],
         "strategies": ["OUT"],
@@ -191,7 +196,9 @@ def make_handler(store):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--products", nargs="+", default=["CL", "NG", "CO"])
+    parser.add_argument("--products", nargs="+", default=list(LIVE_PRODUCTS), type=str.upper,
+                        choices=[*LIVE_PRODUCTS, "BRN", "LCO", "LGO"],
+                        help="Relevant live products only; defaults to all six")
     parser.add_argument("--port", type=int, default=8060)
     parser.add_argument("--max-age", type=float, default=120,
                         help="Reject expression prices with older received updates")
@@ -204,8 +211,9 @@ def main():
         parser.exit(1, "Install dependency: python -m pip install lightstreamer-client-lib\n")
     if args.max_age <= 0:
         parser.error("--max-age must be positive")
-    logging.info("Loading corporate instrument IDs")
-    instruments = get_instruments(list(dict.fromkeys(product_name(p) for p in args.products)))
+    products = list(dict.fromkeys(product_name(p) for p in args.products))
+    logging.info("Loading corporate instrument IDs for: %s", ", ".join(products))
+    instruments = get_instruments(products)
     recorder = LiveMinuteRecorder()
     store = PriceStore(instruments, args.max_age, recorder)
 

@@ -45,3 +45,21 @@ def load_candles(product, expression, timeframe=15, max_candles=MAX_CANDLES, dat
     finally:
         if owned:
             db.close()
+
+
+def load_snapshot_history(selections, start, end, database=None):
+    """Fetch a bounded 15-minute grid through the reader, preserving missing prices."""
+    start, end = pd.Timestamp(start), pd.Timestamp(end)
+    if start.tzinfo is None or end.tzinfo is None or start > end:
+        raise ValueError("Snapshot bounds must be ordered and timezone-aware")
+    targets = pd.date_range(start.tz_convert("UTC").ceil("15min"), end.tz_convert("UTC").floor("15min"), freq="15min")
+    columns = [key for key, _product, _expression in selections]
+    if not selections or not len(targets):
+        return pd.DataFrame(index=targets, columns=columns, dtype=float)
+    owned = database is None
+    db = MarketData() if owned else database
+    try:
+        snapshots = db.expression_snapshots(selections, targets)
+    finally:
+        if owned: db.close()
+    return pd.DataFrame([snapshots[target] for target in targets], index=targets).reindex(columns=columns).astype(float)

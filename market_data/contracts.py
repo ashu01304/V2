@@ -4,6 +4,7 @@ from collections import defaultdict
 import re
 
 import pandas as pd
+from .config import MINUTE_PRODUCT_NAMES
 
 
 TERM = re.compile(
@@ -58,7 +59,7 @@ def spread_recipe(product, expression):
 def price_recipe(product, expression):
     weights = defaultdict(float)
     products = [("CL", 1), ("LCO", -1)] if product == "CL-CO" else [
-        ("LCO" if product == "CO" else product, 1)
+        (MINUTE_PRODUCT_NAMES.get(product, product), 1)
     ]
     for stored_product, sign in products:
         for weight, instrument in spread_recipe(stored_product, expression):

@@ -4,6 +4,13 @@ import pandas as pd
 
 
 CONTRACT_PATTERN = re.compile(r"([+-]?)(?:(\d+(?:\.\d+)?)\*)?([FGHJKMNQUVXZ]\d{2})")
+MONTH_NAMES = dict(zip("FGHJKMNQUVXZ", "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()))
+
+
+def format_contract_label(expression):
+    """Show readable contract months without changing data identifiers."""
+    return re.sub(r"\b([FGHJKMNQUVXZ])(\d{2})\b",
+                  lambda match: f"{MONTH_NAMES[match[1]]} {match[2]}", expression)
 
 
 def parse_expression(expression):

@@ -4,7 +4,7 @@ from pathlib import Path
 import requests
 import urllib3
 
-from .config import SEAC_URL
+from .config import SEAC_URL, SEAC_PRODUCTS
 
 
 def download(path, url=SEAC_URL):
@@ -25,6 +25,8 @@ def rows(path):
         raise ValueError("SEAC source does not contain a JSON object")
     payload = json.loads(text[start:end])
     for symbol, dates in payload.items():
+        if symbol not in SEAC_PRODUCTS:
+            continue
         for trading_date, contracts in dates.items():
             for contract_code, price in contracts.items():
                 yield symbol, contract_code, trading_date, price

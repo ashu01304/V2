@@ -7,7 +7,8 @@ from uuid import uuid4
 
 import pandas as pd
 
-from .config import BATCH_SIZE, DATABASE_PATH, DATA_DIR, SPREAD_OVERLAP_MINUTES
+from .config import (BATCH_SIZE, DATABASE_PATH, DATA_DIR, SPREAD_OVERLAP_MINUTES,
+                     SEAC_PRODUCTS, MINUTE_PRODUCTS)
 from .database import MasterDatabase, spread_frames
 from . import spreads, settlements
 from .publication import writer_lock, atomic_publish
@@ -34,6 +35,8 @@ def _update_locked(database_path, include_settlements):
     settlement_file = _temporary("settlements", database_path.parent)
     published = False
     try:
+        logger.info("Import selection | minute: %s | SEAC: %s",
+                    ", ".join(sorted(MINUTE_PRODUCTS)), ", ".join(SEAC_PRODUCTS))
         if database_path.exists():
             logger.info("Copying existing database to %s", temporary_database)
             shutil.copy2(database_path, temporary_database)

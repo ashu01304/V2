@@ -5,6 +5,54 @@ updates, stores, and queries minute spread prices and daily SEAC settlements.
 
 ## First-time dashboard setup
 
+### Imported product selection
+
+Future historical and live writes use the selection in `market_data/config.py`:
+
+| SEAC product | Minute prefix |
+| --- | --- |
+| CL | CL |
+| CO | LCO |
+| G | LGO |
+| HO | HO |
+| NG | NG |
+| RB | RB |
+| — | WTCL-LCO (retained direct CL–CO data) |
+
+SEAC parsing skips other products. Minute parsing selects the original source
+columns for the allowed prefixes and skips all others before creating batches.
+Product matching is exact: NG does not include NGBF or NG-HH, and HO/RB do not
+include HOBF/RBBF. Both compressed and two-digit source years are recognized.
+The database writer also enforces this selection on registrations, historical
+prices, live prices/provenance, and settlements. Existing unwanted rows are not
+deleted or updated by these filters. Database cleanup remains a separate step.
+
+The source URLs return bulk files, so the full files still download. Filtering
+limits saved data rather than requesting smaller downloads. Restart existing
+live services/importers to load the new code. No import is triggered by editing
+these settings. Offline checks (no API calls or master-database writes):
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest tests.test_import_filters
+```
+
+### Existing-data cleanup
+
+The one-off maintenance command is `python -m market_data.cleanup`. It takes the
+shared writer lock, creates a full backup in `data/backups/`, checks its SHA-256,
+and rebuilds the four master tables into a new compact database. Table schemas,
+indexes, retained registry timestamps and live provenance are preserved. Each
+table is verified against the filtered backup using row count and two data-hash
+aggregates, and the completed file is reopened before atomic publication.
+The JSON cleanup report is saved alongside the backup. No source API is called.
+
+This command changes the active database and should only be run when cleanup is
+intended. It needs free disk space for the backup and working copy; its full-index
+rebuild uses a separate 2 GB memory limit and one thread. Incremental imports keep
+their usual memory limit. `--resume-backup PATH` reuses a prior cleanup backup only
+if it still matches the master; otherwise it takes a fresh backup. Restart running
+services/importers after code changes to ensure they use the import filters.
+
 From the project root (`V2`), install all Python dependencies:
 
 ```powershell
@@ -32,18 +80,100 @@ python main.py
 
 Open http://127.0.0.1:8050 in your browser.
 
+## Independent ideas canvas
+
+Run `python idea_dashboard.py` and open http://127.0.0.1:8055 (or use `--port`).
+This standalone chart plots one live reference-price line for
+CL, CO, G, HO, NG, RB or CL-CO. Choose **Outright / single month**, **Calendar spread** (1:-1) or **Butterfly**
+(1:-2:1), and a leg spacing of 1-24 calendar months. Each point rolls the starting
+month forward by one month. For example, a 2-month spread is Z26-G27; a 2-month
+fly is Z26-2*G27+J27. For CL-CO each month is itself CL minus CO, creating
+four-leg spreads or six-leg butterflies. CL-CO remains the default. Outright mode
+plots each contract's own server reference value; CL-CO single-month mode is the
+calculated CL-minus-CO difference. Spacing is disabled for outright mode.
+The server reference is admin price, falling back to last trade, then midpoint.
+Spreads and flies are calculated from these reference values, as in the original
+single-line chart; this view does not subscribe to directly quoted structures.
+HO and RB show four decimals, NG three, and other products two. Product, structure,
+spacing, starting-month count and "Skip first N months" persist in the browser.
+Contract generation uses the selected product's expiry calendar; CL-CO uses
+months unexpired in both calendars. Missing later months leave gaps rather than
+shifting a structure to different calendar months.
+The plot updates every 10 seconds from one shared live snapshot for the selected
+product (CL and CO together for CL-CO), with missing or
+stale prices left as gaps. Snapshots older than 120 seconds, future-dated
+receipts and invalid reference values are excluded. Drag a box to zoom; mouse-wheel zoom is disabled.
+Zoom stays in place during live refreshes. Series details appear on hover.
+The collapsible price-change table and four direction boxes compare live prices
+with stored prices 15 minutes, 30 minutes, 1 hour, and 2 hours earlier. This section
+ignores the skip setting and follows the selected product, structure and spacing.
+Up or Down requires strictly more than 50% of structures
+with available data; unchanged spreads count in the denominator. History is fetched
+in one cached read-only query per reference minute, month range, or database version.
+The master database stores minute spreads rather than outright minute prices,
+so outright mode shows its live values but leaves historical changes blank.
+Missing data stays blank. Changing product, structure or spacing resets chart zoom;
+timed refreshes preserve it. The chart has no historical lines, error plots, or entry signals. A single
+multi-select dropdown optionally overlays linear, quadratic, cubic least-squares
+fits or a smooth spline with fixed smoothing strength, using the same live
+reference prices as the plotted line. Curves and table values use the selected
+product's display precision; there are no extra fitting controls, and selections persist.
+
+Offline checks: `python -m unittest tests.test_idea_structures tests.test_intraday_data.IdeaLivePlotTests`.
+Restart the live service if it is still running the older three-product selection
+so quotes for all six selected products are subscribed.
+
+## SEAC seasonality dashboard
+
+Run `python idea_dashboard_2.py` and open http://127.0.0.1:8056 (or use `--port`).
+The dashboard opens directly to SEAC settlement seasonality using a product selector
+and monthly contract cells, initially all empty. Click a cell's value to open Count and Structure (outright,
+calendar spread, fly, or defly) in a small popup. Click outside, close it, or select
+another month to save automatically. Each cell keeps its own structure label
+(for example `1 Fly`); legs are expanded and combined only for the calculation.
+Drag a filled value to another month to move its count and structure. The source
+is cleared and an existing selection in the destination is replaced.
+Fly weights are `1,-2,1`; Defly uses `1,-3,3,-1` across consecutive months.
+Set Count to zero to clear that cell. Hover over Count and
+scroll up/down to increase/decrease it without clicking. Click a month label
+(such as H27) to clear only that block; click its value to open the editor.
+Scroll over Structure to cycle through
+Outright, Spread, Fly, and Defly. Enter the number of latest contract years
+to display, ending with the selected expression's first net leg (for example
+H27 with `4` years means 2024–2027). Cross-year structures keep this anchor year;
+Z26–F27 ends at 2026. The exclusion dropdown follows the same contract-year range.
+Check any years to exclude in the **Exclude years** dropdown, and enter a numeric lookback in
+working days, then press **Plot**. All years align to expiry. Average and zero-base
+options apply to the year overlays, which are always used for the chart.
+The builder in `dashboard_components/seac_builder.py` reuses the existing
+seasonality engine and plotter in `analysis/`. Historical lines use daily settlements.
+A small green dot shows the selected expression's live price from the local
+server on port 8060, refreshed every 10 seconds without reloading historical lines.
+The dot follows the expiry axis and zero-base setting. Missing quotes,
+quotes older than two minutes, and excluded anchor years have no live dot.
+Settlement volume and open interest are unavailable.
+
 ## Running the live market-data service
 
-From the project root, start the service with every product currently stored in
-`data/master_database.duckdb`:
+From the project root, start the service for the six selected products:
 
 ```powershell
-$products = (& .venv\Scripts\python.exe -c "import duckdb; c=duckdb.connect(r'data\master_database.duckdb', read_only=True); print(' '.join(r[0] for r in c.execute('SELECT DISTINCT symbol FROM seac_settlements ORDER BY symbol').fetchall()))").Trim().Split(' ', [StringSplitOptions]::RemoveEmptyEntries); & .venv\Scripts\python.exe market_data\live_service.py --products $products
+.\.venv\Scripts\python.exe market_data\live_service.py
 ```
 
 The service listens on `http://127.0.0.1:8060`. Press Ctrl+C to stop it. Run
 the command while connected to the corporate network and after installing the
 `lightstreamer-client-lib` dependency.
+
+The default and allowed live products are CL, CO, G, HO, NG and RB, configured
+in `market_data/config.py`. Use `--products CL CO` to request a smaller subset.
+Other products are rejected before any instrument request. BRN/LCO are accepted
+as aliases for CO, and LGO for G. The corporate instrument request uses BRN for
+CO; incoming BRN/LCO map to CO and incoming LGO maps to G. Minute recording maps
+CO to the stored LCO prefix and G to LGO, including compressed one-digit years.
+The service no longer discovers subscriptions from every SEAC symbol. Restart
+an already-running service for the new subscription selection to take effect.
+This change does not prune or rewrite existing master data, including WTCL-LCO.
 
 The live service also records the last valid received price within each UTC
 minute. It buffers those closes in `data/live_minute_buffer.sqlite3` and publishes

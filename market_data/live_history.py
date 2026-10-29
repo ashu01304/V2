@@ -15,7 +15,7 @@ from uuid import uuid4
 
 import pandas as pd
 
-from .config import DATABASE_PATH, DATA_DIR
+from .config import DATABASE_PATH, DATA_DIR, MINUTE_PRODUCT_NAMES
 from .contracts import _stored_contract_code
 from .database import MasterDatabase
 from .publication import atomic_publish, writer_lock
@@ -30,7 +30,7 @@ def load_contract_expiries():
     """Use explicit full-year expiry dates to disambiguate compressed source codes."""
     frame = pd.read_csv(DATA_DIR / "expiry_dates.csv", dtype=str)
     return {
-        ("LCO" if row.symbol == "CO" else row.symbol, row.contract_code):
+        (MINUTE_PRODUCT_NAMES.get(row.symbol, row.symbol), row.contract_code):
             datetime.fromisoformat(row.expiry_date).date()
         for row in frame.itertuples(index=False)
     }
@@ -41,7 +41,7 @@ def spread_closes(records, instruments, expiries=None):
     groups = defaultdict(dict)
     aliases = {}
     for minute, product, contract, price, _observed in records:
-        stored_product = "LCO" if product == "CO" else product
+        stored_product = MINUTE_PRODUCT_NAMES.get(product, product)
         code = _stored_contract_code(stored_product, contract)
         if expiries is not None and code != contract:
             day = datetime.fromtimestamp(minute, timezone.utc).date()
