@@ -133,6 +133,49 @@ class MarketData:
             WHERE symbol=? AND contract_code=? ORDER BY trading_date
         """, [symbol, contract_code]).fetchdf()
 
+    def structure_settlements(self, legs, start, end):
+        """Weighted settlements on dates with finite prices for every required leg."""
+        if not legs:
+            raise ValueError('A settlement structure needs nonzero legs')
+        values=','.join('(?,?,?)' for _ in legs)
+        parameters=[value for (product,contract),weight in legs.items()
+                    for value in (product,contract,weight)]
+        return self._connection.execute(f'''
+            WITH recipe(symbol,contract_code,weight) AS (VALUES {values})
+            SELECT s.trading_date AS timestamp,SUM(s.price*r.weight) AS price
+            FROM seac_settlements s JOIN recipe r USING(symbol,contract_code)
+            WHERE s.trading_date BETWEEN ? AND ? AND isfinite(s.price)
+            GROUP BY s.trading_date
+            HAVING COUNT(DISTINCT (s.symbol,s.contract_code))=?
+            ORDER BY s.trading_date
+        ''',[*parameters,start,end,len(legs)]).fetchdf()
+
+    def structure_minutes(self, recipe, start, end):
+        """Resolve a complete stored-spread recipe in one query; end is exclusive."""
+        if not recipe:
+            raise ValueError('A minute structure needs nonzero spread legs')
+        sql,parameters=_minute_query(recipe)
+        sql=sql.replace('p.timestamp <= ?', 'p.timestamp < ?')
+        return self._connection.execute(sql+' ORDER BY p.timestamp',
+            [*parameters,start,end,len(recipe)]).fetchdf()
+
+    def spread_coverage(self, instruments, start=None, end=None):
+        """Finite observation counts and actual date bounds for selected stored IDs."""
+        instruments=list(dict.fromkeys(instruments))
+        if not instruments:
+            return pd.DataFrame(columns=['instrument','rows','first','last'])
+        conditions=['instrument IN ('+','.join('?' for _ in instruments)+')','isfinite(price)']
+        parameters=list(instruments)
+        if start is not None:
+            conditions.append('timestamp>=?')
+            parameters.append(start)
+        if end is not None:
+            conditions.append('timestamp<?')
+            parameters.append(end)
+        return self._connection.execute('''SELECT instrument,COUNT(*) AS rows,
+            MIN(timestamp) AS first,MAX(timestamp) AS last FROM spread_prices WHERE '''+
+            ' AND '.join(conditions)+' GROUP BY instrument ORDER BY instrument',parameters).fetchdf()
+
     def synthetic(self, product, expression, start=None, end=None):
         """Calculate a minute synthetic contract from stored spread series."""
         from .contracts import minute_series

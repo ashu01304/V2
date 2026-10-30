@@ -17,6 +17,8 @@ if __package__ in (None, ""):
 
 from market_data.live_history import LiveMinuteRecorder
 from market_data.config import LIVE_PRODUCTS
+from market_data.mds_feed import CONFIG_PATH, load_selection, connect as connect_mds
+from market_data.quote_resolver import StructureResolver
 
 CONTRACT_URL = "https://insight-x.corp.hertshtengroup.com/api/v1/insight/getPDSInstruments"
 ENDPOINT = "https://ls-md.corp.hertshtengroup.com"
@@ -45,7 +47,7 @@ def number(value):
 
 
 def product_name(product):
-    return {"BRN": "CO", "LCO": "CO", "LGO": "G"}.get(product.upper(), product.upper())
+    return {"BRN": "CO", "LCO": "CO", "LGO": "G", "+1XCL": "CL-CO", "BOXES": "CL-CO"}.get(product.upper(), product.upper())
 
 
 def parse_legs(expression):
@@ -63,30 +65,13 @@ def parse_legs(expression):
 
 
 def get_instruments(products):
-    products = list(dict.fromkeys(product_name(p) for p in products))
-    unsupported = set(products) - set(LIVE_PRODUCTS)
-    if not products or unsupported:
-        raise ValueError("Live products must be selected from: " + ", ".join(LIVE_PRODUCTS))
-    request = Request(CONTRACT_URL, data=json.dumps({
-        "products": ["BRN" if p == "CO" else p for p in products],
-        "strategies": ["OUT"],
-    }).encode(), headers={"Content-Type": "application/json"}, method="POST")
-    with urlopen(request, timeout=30) as response:
-        rows = json.load(response)["data"]
-    instruments = {}
-    for row in rows:
-        product = product_name(row["product"])
-        contract = row["qh_code"][-3:].upper()
-        if product not in products or not re.fullmatch(r"[FGHJKMNQUVXZ]\d{2}", contract):
-            continue
-        instruments["TT-" + str(row["instid"])] = (product, contract)
-    if not instruments:
-        raise ValueError("The instrument API returned no matching outright contracts")
-    return instruments
+    """Compatibility entry point: saved quoted structures only; no catalogue fetch."""
+    metadata, _ = load_selection(products=products)
+    return {item: (m["product"], m["contract"]) for item, m in metadata.items()}
 
 
 class PriceStore:
-    def __init__(self, instruments, max_age=120, recorder=None):
+    def __init__(self, instruments, max_age=120, recorder=None, metadata=None):
         self.instruments = instruments
         self.max_age = max_age
         self.recorder = recorder
@@ -94,6 +79,20 @@ class PriceStore:
         self.lock = threading.RLock()
         self.status = "CONNECTING"
         self.error = None
+        self.metadata = metadata or {}
+        self.connections, self.item_users = {}, {}
+        self.resolver = StructureResolver(self)
+
+    @staticmethod
+    def recipe(expression):
+        weights = {}
+        for weight, contract in parse_legs(expression):
+            weights[contract] = weights.get(contract, 0) + weight
+        weights = sorted((c, w) for c, w in weights.items() if w)
+        if not weights:
+            raise ValueError("Expression has no net legs")
+        scale = weights[0][1]
+        return tuple((c, w / scale) for c, w in weights), scale
 
     def update(self, item, fields, record=True):
         if item not in self.instruments:
@@ -105,6 +104,13 @@ class PriceStore:
                    raw=fields, _received=now.timestamp())
         row.update({column: number(fields.get(field))
                     for column, field in COLUMN_FIELDS.items()})
+        mds_fields = {"ask": "askPrice", "ask_size": "askQuantity", "bid": "bidPrice", "bid_size": "bidQuantity",
+                      "last": "tradePrice", "last_size": "tradeQuantity", "volume": "totalTradedQuantity",
+                      "wap": "VWAP", "current_settlement": "settlementPrice"}
+        if item in self.metadata:
+            row.update({column: number(fields.get(field)) for column, field in mds_fields.items()})
+            row.update(structure=self.metadata[item]["structure"], name=self.metadata[item]["name"],
+                       timestamp=fields.get("exchangeTimeNs"))
         row["mid"] = ((row["bid"] + row["ask"]) / 2
                       if row["bid"] is not None and row["ask"] is not None else None)
         row["value"] = next((row[k] for k in ("admin", "last", "mid")
@@ -112,7 +118,7 @@ class PriceStore:
         with self.lock:
             first = not self.rows
             self.rows[(product, contract)] = row
-        if self.recorder is not None and record:
+        if self.recorder is not None and record and (item not in self.metadata or self.metadata[item]["structure"] == "outrights"):
             self.recorder.record(product, contract, row["value"], now)
         if first:
             logging.info("First price update received: %s %s", product, contract)
@@ -120,38 +126,37 @@ class PriceStore:
     def health(self):
         with self.lock:
             newest = max((r["_received"] for r in self.rows.values()), default=None)
+            newest_price = max((r["received_at"] for r in self.rows.values() if r['value'] is not None
+                and self.connections.get(self.item_users.get(r['instrument']), self.status).startswith('CONNECTED:')), default=None)
             age = datetime.now(timezone.utc).timestamp() - newest if newest else None
             return dict(status=self.status, error=self.error,
                         subscribed_instruments=len(self.instruments),
                         received_instruments=len(self.rows), latest_update_age_seconds=age,
+                        connections=dict(self.connections),
+                        latest_price_received_at=newest_price,
                         minute_recording=self.recorder.health() if self.recorder else None)
 
     def snapshot(self, products, raw=False):
         with self.lock:
-            return [{k: v for k, v in row.items()
-                     if not k.startswith("_") and (raw or k != "raw")}
+            return [dict({k: v for k, v in row.items()
+                     if not k.startswith("_") and (raw or k != "raw")},
+                     connected=self.connections.get(self.item_users.get(row["instrument"]), self.status).startswith("CONNECTED:"))
                     for row in self.rows.values()
                     if not products or row["product"] in products]
 
-    def expression(self, product, expression):
-        legs = parse_legs(expression)
-        with self.lock:
-            if not self.status.startswith("CONNECTED:"):
-                raise LookupError("Lightstreamer is not connected: " + self.status)
-            rows = []
-            now = datetime.now(timezone.utc).timestamp()
-            for coefficient, contract in legs:
-                row = self.rows.get((product_name(product), contract))
-                if row is None or row["value"] is None:
-                    raise LookupError("No live price for " + product + " " + contract)
-                if now - row["_received"] > self.max_age:
-                    raise LookupError("Price update is older than "
-                                      + str(self.max_age) + " seconds: " + contract)
-                rows.append((coefficient, row))
-            return dict(product=product_name(product), expression=expression,
-                        value=sum(c * r["value"] for c, r in rows),
-                        timestamp=min(r["received_at"] for _, r in rows),
-                        timestamp_basis="oldest_leg_received_at_utc")
+    def expression(self, product, expression, best_sides=True):
+        return self.resolver.resolve(product_name(product), expression, best_sides=best_sides)
+
+    def quotes(self, product, expressions, best_sides=False):
+        if not isinstance(expressions, list) or len(expressions) > 128 or not all(isinstance(e, str) for e in expressions):
+            raise ValueError("Provide a list of at most 128 expression strings")
+        quotes = []
+        for expression in expressions:
+            try:
+                quotes.append(self.expression(product, expression, best_sides=best_sides))
+            except (LookupError, ValueError) as error:
+                quotes.append(dict(product=product, expression=expression, value=None, error=str(error)))
+        return dict(quotes=quotes)
 
 
 def make_handler(store):
@@ -166,11 +171,13 @@ def make_handler(store):
                     result = store.snapshot(
                         [product_name(p) for p in query.get("product", [])],
                         query.get("raw") == ["1"])
+                elif parsed.path == "/curve":
+                    result = store.resolver.curve(product_name(query["product"][0]), query["expression"][0])
                 elif parsed.path in ("/latest", "/expression/latest"):
                     product = query["product"][0]
                     expression = query["contract" if parsed.path == "/latest"
                                        else "expression"][0]
-                    result = store.expression(product, expression)
+                    result = store.expression(product, expression, best_sides=query.get('best_sides', ['1']) != ['0'])
                 else:
                     self.send_json(404, {"error": "Endpoint not implemented"})
                     return
@@ -179,6 +186,19 @@ def make_handler(store):
                 self.send_json(400, {"error": str(error)})
             except LookupError as error:
                 self.send_json(503, {"error": str(error)})
+
+        def do_POST(self):
+            if urlparse(self.path).path != "/quotes":
+                self.send_json(404, {"error": "Endpoint not implemented"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                if not 0 < length <= 65536:
+                    raise ValueError("Request body must be between 1 and 65536 bytes")
+                body = json.loads(self.rfile.read(length))
+                self.send_json(200, store.quotes(product_name(body["product"]), body["expressions"], best_sides=body.get('best_sides') is True))
+            except (KeyError, ValueError, TypeError) as error:
+                self.send_json(400, {"error": str(error)})
 
         def send_json(self, status, data):
             body = json.dumps(data, allow_nan=False).encode()
@@ -196,10 +216,13 @@ def make_handler(store):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--products", nargs="+", default=list(LIVE_PRODUCTS), type=str.upper,
-                        choices=[*LIVE_PRODUCTS, "BRN", "LCO", "LGO"],
-                        help="Relevant live products only; defaults to all six")
+    parser.add_argument("--config", type=Path, default=CONFIG_PATH,
+                        help="JSON file with products, structures and saved catalogue path")
+    parser.add_argument("--products", nargs="+", default=None,
+                        help="Override configured products, e.g. CL CO +1xCL")
     parser.add_argument("--port", type=int, default=8060)
+    parser.add_argument("--no-record", action="store_true",
+                        help="Test live subscriptions and HTTP endpoints without recording minute data")
     parser.add_argument("--max-age", type=float, default=120,
                         help="Reject expression prices with older received updates")
     args = parser.parse_args()
@@ -211,50 +234,17 @@ def main():
         parser.exit(1, "Install dependency: python -m pip install lightstreamer-client-lib\n")
     if args.max_age <= 0:
         parser.error("--max-age must be positive")
-    products = list(dict.fromkeys(product_name(p) for p in args.products))
-    logging.info("Loading corporate instrument IDs for: %s", ", ".join(products))
-    instruments = get_instruments(products)
-    recorder = LiveMinuteRecorder()
-    store = PriceStore(instruments, args.max_age, recorder)
-
-    class ConnectionListener(ClientListener):
-        def onStatusChange(self, status):
-            with store.lock:
-                store.status = status
-            logging.info("Lightstreamer: %s", status)
-
-        def onServerError(self, code, message):
-            with store.lock:
-                store.error = str(code) + ": " + message
-            logging.error("Lightstreamer server: %s %s", code, message)
-
-    class PriceListener(SubscriptionListener):
-        def onItemUpdate(self, update):
-            try:
-                store.update(update.getItemName(),
-                             {field: update.getValue(field) for field in FIELDS},
-                             record=not update.isSnapshot())
-            except Exception:
-                logging.exception("Could not process live price update")
-
-        def onSubscriptionError(self, code, message):
-            with store.lock:
-                store.error = str(code) + ": " + message
-            logging.error("Subscription: %s %s", code, message)
-
-    client = LightstreamerClient(ENDPOINT, "AdminPriceAdapter")
-    client.connectionDetails.setUser("Test")
-    client.addListener(ConnectionListener())
-    subscription = Subscription("MERGE", list(instruments), FIELDS)
-    subscription.setDataAdapter("AdminPrice_DataAdapter")
-    subscription.setRequestedSnapshot("yes")
-    subscription.setRequestedMaxFrequency("1")
-    subscription.addListener(PriceListener())
+    metadata, batch_size = load_selection(args.config, args.products)
+    instruments = {item: (meta["product"], meta["contract"]) for item, meta in metadata.items()}
+    logging.info("Loaded %d saved contracts from %s", len(instruments), args.config)
+    recorder = None if args.no_record else LiveMinuteRecorder()
+    store = PriceStore(instruments, args.max_age, recorder, metadata)
+    clients = []
     server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(store))
     try:
-        recorder.start()
-        client.subscribe(subscription)
-        client.connect()
+        if recorder:
+            recorder.start()
+        clients = connect_mds(store, metadata, batch_size)
         logging.info("Serving %d instruments at http://127.0.0.1:%s; Ctrl+C to stop",
                      len(instruments), args.port)
         server.serve_forever()
@@ -262,8 +252,10 @@ def main():
         logging.info("Stopping live service")
     finally:
         server.server_close()
-        client.disconnect()
-        recorder.close()
+        for client in clients:
+            client.disconnect()
+        if recorder:
+            recorder.close()
 
 
 if __name__ == "__main__":

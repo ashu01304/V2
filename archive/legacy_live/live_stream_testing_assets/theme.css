@@ -1,0 +1,68 @@
+:root {
+    color-scheme: dark;
+    --Dash-Text-Strong: #ffffff;
+    --Dash-Text-Weak: #cccccc;
+    --Dash-Text-Disabled: #777777;
+    --Dash-Fill-Inverse-Strong: #111111;
+    --Dash-Fill-Interactive-Strong: #ffffff;
+    --Dash-Fill-Interactive-Weak: #333333;
+    --Dash-Stroke-Strong: #555555;
+    --Dash-Stroke-Weak: #333333;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: #000000; color: #ffffff; font: 13px Arial, sans-serif; }
+main { background: #000000; }
+h3 { font-size: 21px; }
+h4 { font-size: 15px; border-top: 1px solid #333333; padding-top: 18px; margin-bottom: 12px; }
+p { color: #cccccc; line-height: 1.6; }
+label > span { color: #cccccc; margin-bottom: 5px; }
+input, textarea, button, select { font: inherit; color: #ffffff; background: #111111;
+    border: 1px solid #555555; border-radius: 3px; }
+input, textarea { padding: 7px 9px; }
+textarea { font-family: Consolas, monospace; resize: vertical; }
+button { cursor: pointer; padding: 8px 12px; }
+button:hover { background: #333333; }
+#probe-discover, #probe-start { background: #ffffff; color: #000000; border-color: #ffffff; font-weight: 600; }
+#probe-discover:hover, #probe-start:hover { background: #dddddd; }
+input[type=checkbox], input[type=radio] { accent-color: #ffffff; }
+input::placeholder, textarea::placeholder { color: #999999; }
+:focus-visible { outline: 1px solid #ffffff; outline-offset: 2px; }
+details { margin: 12px 0; border: 1px solid #333333; background: #080808; padding: 10px 12px; }
+summary { cursor: pointer; color: #ffffff; }
+pre { background: #080808; color: #dddddd; font: 12px/1.6 Consolas, monospace; overflow-wrap: anywhere; }
+.dash-input-container { background: #111111; border-color: #555555; }
+.dash-input-container .dash-input-element { background: transparent; color: #ffffff; }
+.dash-dropdown, .dash-dropdown-content, [role=listbox] { color: #ffffff; background: #111111; border-color: #555555; }
+[role=option] { color: #ffffff; background: #111111; }
+[role=option]:hover, [role=option][data-highlighted] { background: #333333; }
+.dash-table-container { --accent: #ffffff; --selected-background: #292929; --selected-color: #ffffff; }
+.dash-table-container .dash-cell.cell--selected, .dash-table-container .dash-cell.focused {
+    background: #292929 !important; border-color: #ffffff !important;
+}
+.dash-table-container input { color: #ffffff !important; background: #101010 !important; }
+.dash-table-container .previous-next-container { color: #ffffff; }
+.dash-table-container svg { color: #ffffff; }
+a { color: #ffffff; }
+::selection { background: #ffffff; color: #000000; }
+.monitor-page { padding: 14px 18px; }
+.monitor-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.monitor-header h3 { margin: 0; font-size: 19px; }
+.monitor-header > span { font: 12px Consolas, monospace; color: #cccccc; }
+.monitor-description { margin: 8px 0 12px; font-size: 12px; }
+.monitor-counts { display: flex; gap: 1px; border: 1px solid #333333; background: #333333; margin-bottom: 8px; }
+.monitor-count { display: flex; flex: 1; gap: 10px; align-items: baseline; flex-wrap: wrap; background: #101010; padding: 10px 14px; }
+.monitor-count strong { font-size: 22px; }
+.monitor-count span { font-size: 12px; }
+.monitor-count small { color: #aaaaaa; font-size: 11px; }
+.monitor-coverage { color: #aaaaaa; font-size: 11px; padding: 4px 0 10px; }
+.monitor-error:not(:empty) { border: 1px solid #777777; padding: 8px; margin: 8px 0; color: white; }
+.monitor-empty:not(:empty) { text-align: center; padding: 18px; color: #cccccc; }
+.monitor-filters { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 6px; }
+.monitor-small-filter { width: 190px; }
+.monitor-contract-filter { flex: 1; min-width: 280px; }
+.monitor-filter-note { color: #aaaaaa; font-size: 11px; margin-bottom: 12px; }
+#monitor-selection-status { color: #ffffff; margin-left: 8px; }
+.monitor-manual-input { flex: 1; min-width: 280px; }
+#monitor-manual-status { color: #ffffff; }
+@media(max-width:700px) { .monitor-counts { flex-wrap: wrap; } .monitor-count { min-width: 120px; } }

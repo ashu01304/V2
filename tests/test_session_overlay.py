@@ -8,7 +8,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
-from market_data.intraday import load_session_minutes, session_window
+from market_data.workflow_client import load_session_minutes, session_window
 from analysis.session_overlay import (
     make_session_overlay, session_lines,
 )

@@ -1,16 +1,22 @@
 import numpy as np
 import pandas as pd
 
-from analysis.expression import evaluate_expression, parse_expression, shift_contract_year
+from analysis.expression import parse_expression, shift_contract_year
 from analysis.expiry import OfficialExpiryLookup
-from market_data.live_client import LiveMarketDataClient
+from market_data.data_client import DataClient
+from market_data.workflow_client import WorkflowLiveClient, full_structure
 
 
 class StrategyRollover:
     def __init__(self, db, live=None):
         self.db = db
-        self.live = live or LiveMarketDataClient()
+        self.live = live or WorkflowLiveClient('rollover')
+        self.data = DataClient(database=db)
         self.official_expiry = OfficialExpiryLookup()
+
+    def close(self):
+        """Release this calculation's client; the caller owns the database reader."""
+        self.data.close()
 
     def calculate(self, symbol, expression, periods=6):
         series, warnings = {}, []
@@ -46,7 +52,7 @@ class StrategyRollover:
             values = self._expression_values(symbol, shifted_expression)
             active = rollover_expiry <= latest_market_date < end_expiry
             if active:
-                values = self._append_latest_minute_value(
+                values = self._append_latest_live_value(
                     symbol, shifted_expression, values, end_expiry
                 )
             live_date = values.attrs.get("live_date")
@@ -96,53 +102,29 @@ class StrategyRollover:
             parts.append(f"{sign}{multiplier}{contract}")
         return "".join(parts)
 
-    def _expression_values(self, symbol, expression):
-        legs = parse_expression(expression)
-        codes = list(dict.fromkeys(code for _, code in legs))
-        histories = self.db.get_contract_history(symbol, codes)
-        if any(code not in histories or histories[code].empty for code in codes):
-            return pd.Series(dtype=float)
-        data = pd.DataFrame({code: histories[code]["Close"] for code in codes}).dropna()
-        return evaluate_expression(expression, data)
+    def _expression_values(self,symbol,expression):
+        frame=self.data.seac(full_structure(symbol,expression),start='2000-01-01',
+                             end=self.latest_market_date.date())['data']
+        return frame.set_index('timestamp')['price']
 
-    def _append_latest_minute_value(self, symbol, expression, values, end_expiry):
-        """Append one newest minute value to the active rollover series."""
-        if values.empty or not hasattr(self.db, "synthetic"):
-            return values
-        if symbol == "CL-CO":
+    def _append_latest_live_value(self,symbol,expression,values,end_expiry):
+        if values.empty:
             return values
         try:
-            current = self.live.expression(symbol, expression)
-            latest_date = pd.Timestamp(current["timestamp"]).tz_localize(None).normalize()
-            if values.index.max().normalize() < latest_date <= end_expiry:
-                output = values.copy()
-                output.loc[latest_date] = float(current["value"])
-                output = output.sort_index()
-                output.attrs["live_date"] = latest_date
-                return output
+            self.live.replace([full_structure(symbol,expression)])
+            quote=self.live.expression(symbol,expression)
+            if quote.get('value') is None or not quote.get('timestamp'):
+                return values
+            day=pd.Timestamp(quote['timestamp']).tz_localize(None).normalize()
+            if values.index.max().normalize()<day<=end_expiry:
+                result=values.copy()
+                result.loc[day]=float(quote['value'])
+                result=result.sort_index()
+                result.attrs['live_date']=day
+                return result
         except Exception:
             pass
-        minute_product = {"CO": "LCO"}.get(symbol, symbol)
-        try:
-            minute = self.db.synthetic(
-                minute_product, expression,
-                start=pd.Timestamp(values.index.max(), tz="UTC"),
-            )
-        except Exception:
-            return values
-        if minute.empty:
-            return values
-        minute = minute.dropna(subset=["timestamp", "price"]).sort_values("timestamp")
-        if minute.empty:
-            return values
-        latest_date = pd.Timestamp(minute["timestamp"].iloc[-1]).tz_localize(None).normalize()
-        if latest_date <= values.index.max().normalize() or latest_date > end_expiry:
-            return values
-        output = values.copy()
-        output.loc[latest_date] = float(minute["price"].iloc[-1])
-        output = output.sort_index()
-        output.attrs["live_date"] = latest_date
-        return output
+        return values
 
     def _official_expiry(self, symbol, contract):
         if not contract:

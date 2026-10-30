@@ -27,19 +27,9 @@ class ConditionalHistogramTests(unittest.TestCase):
         self.assertEqual(len(canvas.central_95_prices(single)), 1)
         self.assertTrue(canvas.central_95_prices(frame.iloc[:0]).empty)
 
-    def test_automatic_results_follow_live_k_ranges(self):
-        now = pd.Timestamp.now(tz="UTC")
-        row = {"month": 1, "contract": "Jan 27-Feb 27", "live": 12, "k": 3, "live_asof": now.isoformat()}
-        frame = pd.DataFrame(columns=["month", "price", "frequency"])
-        with patch.object(canvas, "visible_pairs", return_value=[{"month": 1, "contract": row["contract"]}]), \
-             patch.object(canvas, "histogram_results", return_value=(frame, {"samples": 0, "minutes": 0, "years": 0})) as results:
-            canvas.apply_filters(0, [row], 30)
-            self.assertEqual(results.call_args.args[0], ((1, (.09, .15)),))
-            row["live"] = 13
-            canvas.apply_filters(0, [row], 30)
-            self.assertEqual(results.call_args.args[0], ((1, (.1, .16)),))
-        callback = next(item for item in canvas.app.callback_map.values() if item["inputs"][0]["id"] == "filter-run")
-        self.assertIn({"id": "filter-ranges", "property": "data"}, callback["inputs"])
+    def test_removed_conditional_callbacks_are_not_registered(self):
+        self.assertFalse(any(item['inputs'] and item['inputs'][0]['id'] == 'filter-run'
+                             for item in canvas.app.callback_map.values()))
 
     def test_results_cache_tracks_ranges_publication_and_reference_minute(self):
         frame = pd.DataFrame(columns=["month", "price", "frequency"])
@@ -122,21 +112,18 @@ class ConditionalHistogramTests(unittest.TestCase):
         self.assertEqual(row["k"], 3)
         self.assertEqual(status, "ok")
 
-    def test_live_calendar_prices_are_ticks_and_stale_legs_are_excluded(self):
+    def test_live_calendar_prices_use_complete_box_quotes(self):
         from datetime import date
         now = pd.Timestamp("2026-10-26T12:00Z")
         expiry = [("F27", date(2026, 12, 20)), ("G27", date(2027, 1, 20))]
-        records = [{"product": product, "contract": code, "value": price, "received_at": now.isoformat()}
-                   for product, code, price in [("CL", "F27", 75.), ("CO", "F27", 73.),
-                                                 ("CL", "G27", 74.), ("CO", "G27", 72.05)]]
         with patch.object(canvas, "load_expiries", return_value=expiry), patch.object(canvas, "LiveMarketDataClient") as factory:
             client = factory.return_value
-            client.health.return_value = {"status": "CONNECTED:WS-STREAMING"}
-            client.snapshot.return_value = records
+            client.quotes.return_value = {"F27-G27": {"value": .05, "timestamp": now.isoformat()}}
             quotes, _ = canvas.live_month_ticks(now)
             self.assertEqual(quotes[1]["live"], 5)
             self.assertEqual(quotes[1]["contract"], "Jan 27-Feb 27")
-            records[-1]["received_at"] = "2026-10-26T11:50Z"
+            client.snapshot.assert_not_called()
+            client.quotes.return_value = {"F27-G27": {"value": None, "error": "No fresh quote"}}
             quotes, _ = canvas.live_month_ticks(now)
             self.assertNotIn(1, quotes)
             self.assertEqual(client.close.call_count, 2)
@@ -179,9 +166,7 @@ class ConditionalHistogramTests(unittest.TestCase):
                     found = find_table(value)
                     if found is not None:
                         return found
-        rows = find_table(page)["data"]
-        self.assertEqual([row["month"] for row in rows], [pair["month"] for pair in pairs[3:]])
-        self.assertEqual(rows[0]["contract"], pairs[3]["contract"])
+        self.assertIsNone(find_table(page))
 
     def setUp(self):
         canvas.histogram_results.cache_clear()
@@ -253,30 +238,13 @@ class ConditionalHistogramTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.reader.calendar_filter_histograms(filters, self.start, self.end)
 
-    def test_dashboard_reads_only_on_apply_and_renders_twelve_histograms(self):
-        self.start = pd.Timestamp.now(tz="UTC").floor("min") - pd.Timedelta(days=1)
-        self.add(0, "F26-G26", .1)
-        with patch.object(canvas, "MarketData", return_value=self.reader) as factory:
+    def test_seac_layout_does_not_load_removed_conditional_tab(self):
+        with patch.object(canvas, 'MarketData') as factory:
             client = canvas.app.server.test_client()
-            for endpoint in ("/", "/_dash-layout", "/_dash-dependencies"):
+            for endpoint in ('/', '/_dash-layout', '/_dash-dependencies'):
                 self.assertEqual(client.get(endpoint).status_code, 200)
-            self.assertNotIn("filter-dates", client.get("/_dash-layout").get_data(as_text=True))
+            self.assertNotIn('filter-ranges', client.get('/_dash-layout').get_data(as_text=True))
             factory.assert_not_called()
-            key = next(key for key, callback in canvas.app.callback_map.items() if callback["inputs"][0]["id"] == "filter-run")
-            response = client.post("/_dash-update-component", json={
-                "output": key, "outputs": [{"id": "filter-histograms", "property": "children"},
-                                            {"id": "filter-status", "property": "children"}],
-                "inputs": [{"id": "filter-run", "property": "n_clicks", "value": 1},
-                          {"id": "filter-ranges", "property": "data", "value": []},
-                          {"id": "filter-days", "property": "value", "value": 30},
-                          {"id": "filter-skip", "property": "value", "value": 3}],
-                "state": [],
-                "changedPropIds": ["filter-run.n_clicks"]})
-            self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
-            payload = response.get_json()["response"]
-            self.assertEqual(len(payload["filter-histograms"]["children"]), 8)
-            self.assertIn("1 matching minute/contract-year", payload["filter-status"]["children"])
-            factory.assert_called_once()
 
     def test_filter_validation_and_empty_bounds(self):
         self.assertEqual(canvas.parse_filters([{"month": 1, "minimum": "", "maximum": None}]), {})

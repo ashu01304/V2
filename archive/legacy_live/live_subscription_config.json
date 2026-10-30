@@ -1,0 +1,7 @@
+{
+  "_comment": "Legacy bridge configuration only (legacy_live_service.py). The shared live manager subscribes on dashboard demand and does not read this file. Products: CL, CO (Brent), G (gasoil), HO, NG, RB, +1xCL (CL-BZ boxes). Structures: spreads, flies, boxes. Outright subscriptions are disabled. catalogue_file is relative to this file; batch_size is IDs per legacy subscription batch (maximum 250). This _comment field is ignored.",
+  "products": ["CL", "CO", "NG", "+1xCL"],
+  "structures": [ "spreads", "flies", "boxes"],
+  "catalogue_file": "../data/quoted_live_probe_full_20261029_131318.json",
+  "batch_size": 250
+}

@@ -22,24 +22,21 @@ class StructureTests(unittest.TestCase):
                          ["Z26-2*F27+G27", "F27-2*G27+H27"])
         self.assertEqual(canvas.structure_expressions(self.codes[:2], "fly", 1), [])
 
-    def test_fly_reference_value_and_missing_middle_leg(self):
-        self.assertEqual(canvas.spread_values(self.prices, self.codes[:3], "fly"), [-1.])
-        self.prices.pop("F27")
+    def test_fly_reference_comes_from_complete_quote_not_outrights(self):
         self.assertEqual(canvas.spread_values(self.prices, self.codes[:3], "fly"), [None])
+        self.prices["Z26-2*F27+G27"] = -0.75
+        self.assertEqual(canvas.spread_values(self.prices, self.codes[:3], "fly"), [-0.75])
 
-    def test_single_product_uses_its_own_expiries_and_snapshot(self):
+    def test_single_product_requests_complete_quotes(self):
         with patch.object(canvas, "load_expiries", return_value=[("Z26", date(2026, 11, 20))]) as expiries:
             self.assertEqual(canvas.consecutive_contracts(2, date(2026, 10, 28), product="G"), self.codes[:3])
             expiries.assert_called_once_with("G")
-        now = pd.Timestamp("2026-10-28T12:00Z")
-        records = [{"product": "G", "contract": "Z26", "value": 700, "bid": 699.5, "ask": 700.5,
-                    "received_at": now.isoformat()}]
         with patch.object(canvas, "LiveMarketDataClient") as factory:
-            factory.return_value.health.return_value = {"status": "CONNECTED:WS-STREAMING"}
-            factory.return_value.snapshot.return_value = records
-            reference, _ = canvas.live_prices(now, product="G")
-            self.assertEqual(reference, {"Z26": 700})
-            factory.return_value.snapshot.assert_called_once_with(["G"])
+            factory.return_value.quotes.return_value = {"Z26-F27": {"value": 0.7}}
+            reference, _ = canvas.live_prices(product="G", expressions=["Z26-F27"])
+            self.assertEqual(reference, {"Z26-F27": 0.7})
+            factory.return_value.quotes.assert_called_once_with("G", ["Z26-F27"])
+            factory.return_value.snapshot.assert_not_called()
 
     def test_history_cache_and_selections_follow_product_and_structure(self):
         canvas._historical_changes.cache_clear()
@@ -64,28 +61,18 @@ class StructureTests(unittest.TestCase):
              patch.object(canvas, "database_signature", return_value=None), patch.object(canvas, "set_props"):
             figure = canvas.update_chart(2, 1, 0, 0, [], "NG", "fly", 2)
         contracts.assert_called_once_with(6, product="NG")
-        live.assert_called_once_with(product="NG")
+        live.assert_called_once_with(product="NG", expressions=canvas.structure_expressions(self.codes, "fly", 2), with_sides=True)
         self.assertEqual(len(figure.data[0].y), 2)
         self.assertIn("NG:fly:2:", figure.layout.uirevision)
         self.assertIn("Butterfly", figure.layout.yaxis.title.text)
 
-    def test_outright_mode_preserves_values_and_product_precision(self):
-        self.assertEqual(canvas.structure_expressions(self.codes[:3], "outright", 12), self.codes[:3])
-        figure = canvas.make_figure(self.codes[:3], {"Z26": .0935, "G27": .0941}, product="HO", structure="outright")
-        self.assertEqual(len(figure.data), 1)
+    def test_curve_keeps_product_precision_and_missing_quotes(self):
+        prices = {"Z26-F27": {"bid": .0935, "ask": .0937}, "G27-H27": {"bid": .0941, "ask": None}}
+        figure = canvas.make_figure(self.codes[:4], prices, product="HO", structure="spread")
         self.assertEqual(list(figure.data[0].y), [.0935, None, .0941])
         self.assertEqual(figure.layout.yaxis.tickformat, ".4f")
-        self.assertEqual(canvas.spread_values({"Z26": 3.123}, self.codes[:1], "outright", product="NG"), [3.123])
-
-    def test_outright_callback_uses_one_leg_per_point_and_skips_unavailable_history(self):
-        with patch.object(canvas, "consecutive_contracts", return_value=self.codes[:3]) as contracts, \
-             patch.object(canvas, "live_prices", return_value=(self.prices, "connected")), \
-             patch.object(canvas, "_historical_changes") as history, \
-             patch.object(canvas, "database_signature", return_value=("v1",)), patch.object(canvas, "set_props"):
-            figure = canvas.update_chart(3, 0, 0, 0, [], "CL", "outright", 12)
-        contracts.assert_called_once_with(2, product="CL")
-        history.assert_not_called()
-        self.assertEqual(list(figure.data[0].y), [10, 9, 7])
+        self.assertEqual(list(figure.data[1].y), [.0937, None, None])
+        self.assertNotIn("outright", canvas.STRUCTURES)
 
 
 if __name__ == "__main__":

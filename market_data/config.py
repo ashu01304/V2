@@ -5,6 +5,9 @@ import re
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
 DATABASE_PATH = DATA_DIR / "master_database.duckdb"
+LIVE_MANAGER_URL = "http://127.0.0.1:8071"
+LIVE_SUBSCRIPTION_TTL_SECONDS = 8 * 60 * 60
+LIVE_MINUTE_PUBLISH_SECONDS = 10 * 60
 
 # Product names exposed by settlements and the live bridge.
 LIVE_PRODUCTS = ("CL", "CO", "G", "HO", "NG", "RB")

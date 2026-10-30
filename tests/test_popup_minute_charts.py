@@ -65,7 +65,7 @@ class PopupMinuteChartTests(unittest.TestCase):
     def test_no_fetch_without_a_selected_cell_including_control_changes(self):
         with patch.object(charts, "load_candles") as candles, \
              patch.object(charts, "load_session_minutes") as minutes, \
-             patch("market_data.live_client.LiveMarketDataClient") as live:
+             patch("market_data.workflow_client.LiveMarketDataClient") as live:
             response = self.request("popup-candle-chart.figure", [
                 ("selected-cell", "data", None), ("popup-candle-timeframe", "value", 30),
             ], "popup-candle-timeframe.value")
@@ -87,7 +87,7 @@ class PopupMinuteChartTests(unittest.TestCase):
         client.expression.return_value = None
         with patch.object(charts, "load_candles", return_value=self.candles) as candles, \
              patch.object(charts, "load_session_minutes") as minutes, \
-             patch("market_data.live_client.LiveMarketDataClient", return_value=client):
+             patch("market_data.workflow_client.LiveMarketDataClient", return_value=client):
             response = self.request("popup-candle-chart.figure", [
                 ("selected-cell", "data", self.selection), ("popup-candle-timeframe", "value", 15),
             ], "selected-cell.data")

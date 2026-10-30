@@ -126,8 +126,8 @@ class DatabaseBoundaryTests(unittest.TestCase):
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
                     continue
-                # live_history's execute calls belong only to its private SQLite spool.
-                if node.func.attr in {"execute", "executemany"} and relative != "market_data/live_history.py":
+                # The live request registry uses private SQLite, never the master DuckDB.
+                if node.func.attr in {"execute", "executemany"} and relative != "market_data/live_request_store.py":
                     violations.append(f"{relative}:{node.lineno} executes SQL")
                 if ast.unparse(node.func) == "duckdb.connect":
                     violations.append(f"{relative}:{node.lineno} opens DuckDB")
@@ -159,6 +159,7 @@ class DashboardLiveRefreshTests(unittest.TestCase):
             "job_id": 1, "processing": True, "version": 0}
         client = Mock()
         client.expression.return_value = {"value": 12., "timestamp": "2026-10-15T10:00:00Z"}
+        client.quotes.return_value = {"Z26-F27": client.expression.return_value}
         self.client = client
         self.ns = {"pd": pd, "np": np, "Seasonality": Seasonality, "state_lock": threading.Lock(),
             "dashboard_state": self.state, "LiveMarketDataClient": Mock(return_value=client),
@@ -229,7 +230,7 @@ class DashboardLiveRefreshTests(unittest.TestCase):
 
     def test_missing_quote_retains_last_value_and_settlement_baseline(self):
         self.run_job()
-        self.client.expression.side_effect = self.ns["RequestException"]("offline")
+        self.client.quotes.side_effect = self.ns["RequestException"]("offline")
         self.run_job()
         self.assertEqual(self.state["cache"][self.key][0], (12., 2.))
         self.ns["MarketData"].assert_not_called()
@@ -238,7 +239,7 @@ class DashboardLiveRefreshTests(unittest.TestCase):
         def supersede(*args):
             self.state["job_id"] = 2
             return {"value": 99., "timestamp": "2026-10-15T10:00:00Z"}
-        self.client.expression.side_effect = supersede
+        self.client.quotes.side_effect = supersede
         self.run_job()
         self.assertEqual(self.state["cache"][self.key][0], (10., 0.))
         self.ns["publish_dashboard_snapshot"].assert_not_called()

@@ -8,7 +8,7 @@ import plotly.graph_objects as go
 from plotly.colors import qualitative
 
 from analysis.intraday_chart import price_precision, round_price
-from market_data.intraday import SESSION_TIMEZONE, SESSION_MINUTES
+from market_data.workflow_client import SESSION_TIMEZONE, SESSION_MINUTES
 
 
 def session_lines(minutes):

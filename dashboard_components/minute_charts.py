@@ -7,8 +7,8 @@ from dash import Input, Output, State, dcc, html, no_update
 
 from analysis.intraday_chart import make_intraday_figure, make_intraday_live_trace
 from analysis.session_overlay import make_session_overlay, make_session_live_trace
-from market_data.live_client import fetch_live_quote
-from market_data.intraday import TIMEFRAMES, load_candles, load_session_minutes
+from market_data.workflow_client import fetch_live_quote,load_candles,load_session_minutes
+from market_data.workflow_client import TIMEFRAMES
 from market_data.queries import database_signature
 
 GRAPH_CONFIG = {"displaylogo": False, "displayModeBar": False, "scrollZoom": False}

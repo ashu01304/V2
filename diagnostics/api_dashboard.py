@@ -1,7 +1,8 @@
-"""Local OHLCV/database chart comparison: python api_testing_dashboard.py"""
+"""Local OHLCV/database chart comparison: python -m diagnostics.api_dashboard"""
 
 import argparse
 import re
+from pathlib import Path
 
 import duckdb
 import pandas as pd
@@ -14,6 +15,8 @@ from API.endpoints import ohlc
 from API.explorer import explorer_layout, register_explorer
 from API.vap_panel import vap_layout, register_vap
 from market_data.queries import MarketData
+from market_data.data_client import DataClient
+from market_data.workflow_client import full_structure
 
 INTERVALS = {"1m": ("1M", "1min"), "5m": ("5M", "5min"),
              "1h": ("1H", "1h"), "1d": ("1D", "1D")}
@@ -90,7 +93,7 @@ def create_app():
             db.close()
     except (duckdb.Error, OSError, RuntimeError) as error:
         database_note = f"Database selector unavailable ({type(error).__name__}); API examples remain selectable."
-    app = Dash(__name__)
+    app = Dash(__name__,assets_folder=str(Path(__file__).resolve().parents[1]/'assets'))
     app.title = "API chart comparison"
     app.layout = html.Div([
         html.H3("Contract chart comparison"),
@@ -156,11 +159,14 @@ def create_app():
                 notes.append(f"OHLCV: {error}")
         try:
             product, expression = db_contract(code, override)
-            db = MarketData()
+            data = DataClient()
             try:
-                frames[1] = db.expression_minutes(product, expression, start.to_pydatetime(), last.to_pydatetime())
+                result=data.minute(full_structure(product,expression),start=start,end=boundary,interval=None)
+                frames[1] = result['data']
+                if frames[1].empty:
+                    messages[1]=result['message']
             finally:
-                db.close()
+                data.close()
             frames[1]["timestamp"] = pd.to_datetime(frames[1].timestamp, utc=True)
             minute_count = len(frames[1])
             frames[1] = (frames[1].sort_values("timestamp").set_index("timestamp")["price"]
@@ -184,5 +190,5 @@ def create_app():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--port", type=int, default=8057)
+    parser.add_argument("--port", type=int, default=8058)
     create_app().run(host="127.0.0.1", port=parser.parse_args().port, debug=False)

@@ -9,10 +9,11 @@ import pandas as pd
 from flask import jsonify, request
 from requests import RequestException
 
-from market_data.intraday import SESSION_TIMEZONE, session_window
+from market_data.workflow_client import SESSION_TIMEZONE, session_window
 from market_data import MarketData
 from market_data.queries import database_signature
-from market_data.live_client import fetch_live_quote
+from market_data.workflow_client import WorkflowLiveClient,full_structure
+from market_data.data_client import DataClient
 
 
 class BookmarkRanges:
@@ -42,8 +43,13 @@ class BookmarkRanges:
             if missing:
                 self.history.update(self.load_ranges(missing, start, end))
             result = {}
+            live=WorkflowLiveClient('bookmarks')
+            live.replace([full_structure(product,expression) for _,product,expression in selections])
             for key, product, expression in selections:
-                quote = fetch_live_quote(product, expression)
+                try:
+                    quote=live.expression(product,expression)
+                except (RequestException,ValueError):
+                    continue
                 if not quote:
                     continue
                 try:
@@ -70,7 +76,15 @@ class BookmarkRanges:
     def load_ranges(selections, start, end):
         db = MarketData()
         try:
-            return db.expression_ranges(selections, start.to_pydatetime(), end.to_pydatetime())
+            client=DataClient(database=db)
+            try:
+                result={}
+                for key,product,expression in selections:
+                    frame=client.minute(full_structure(product,expression),start=start,end=end,interval=None)['data']
+                    result[key]=None if frame.empty else (float(frame['price'].min()),float(frame['price'].max()))
+                return result
+            finally:
+                client.close()
         finally:
             db.close()
 

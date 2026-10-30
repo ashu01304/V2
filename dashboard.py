@@ -8,9 +8,10 @@ from dash import (
     dash_table, no_update, set_props,
 )
 
-from market_data.chart_updates import preserve_live_charts
+from dashboard_components.chart_updates import preserve_live_charts
 from market_data.queries import database_signature
-from market_data import LiveMarketDataClient, MarketData
+from market_data import MarketData
+from market_data.workflow_client import WorkflowLiveClient as LiveMarketDataClient,full_structure
 from requests import RequestException
 from analysis.expression import parse_expression
 from analysis.forward_curve import ForwardCurve
@@ -44,20 +45,20 @@ def format_contract_label(contract):
 
 def expression_metrics(sznlty, symbol, expression, rank_years):
     legs = parse_expression(expression)
-    codes = sorted({code for _, code in legs})
-    histories = sznlty.db.get_contract_history(symbol, codes)
-    if not legs or any(code not in histories or histories[code].empty for code in codes):
-        return None, None
-    common = None
-    for code in codes:
-        dates = pd.DatetimeIndex(histories[code].index).normalize()
-        common = dates if common is None else common.intersection(dates)
-    if common is None or common.empty:
+    if not legs:
         return None, None
     anchor = legs[0][1]
-    expiry = sznlty.official_or_last_date(symbol, anchor, histories[anchor])
+    history=sznlty.db.get_contract_history(symbol,[anchor]).get(anchor)
+    if history is None or history.empty:
+        return None,None
+    expiry = sznlty.official_or_last_date(symbol, anchor, history)
+    settlements=sznlty.data.seac(full_structure(symbol,expression),
+        start=(expiry-pd.offsets.BDay(500)).date(),end=expiry.date())['data']
+    if settlements.empty:
+        return None,None
+    last_settlement=pd.Timestamp(settlements['timestamp'].iloc[-1])
     required = max(0, int(np.busday_count(
-        common.max().to_datetime64().astype("datetime64[D]"),
+        last_settlement.to_datetime64().astype("datetime64[D]"),
         expiry.to_datetime64().astype("datetime64[D]"),
     )))
     current_year = 2000 + int(anchor[1:])
@@ -70,14 +71,11 @@ def expression_metrics(sznlty, symbol, expression, rank_years):
     if current is None or combined[current].dropna().empty:
         return None, None
     live = combined[current].dropna()
-    settlement = sum(
-        coefficient * histories[code].loc[common.max(), "Close"]
-        for coefficient, code in legs
-    )
+    settlement = float(settlements['price'].iloc[-1])
     value = float(live.iloc[-1])
     result["dashboard_context"] = {
         "year": current_year, "settlement": float(settlement),
-        "last_settlement": common.max(), "expiry": expiry,
+        "last_settlement": last_settlement, "expiry": expiry,
         "window_days": max(400, required + 10),
     }
     return (value, value - float(settlement)), result
@@ -91,15 +89,12 @@ def latest_settlement_date(database):
 def latest_live_timestamp():
     client = LiveMarketDataClient()
     try:
-        # Expression prices also use the bridge's received_at timestamp.
-        rows = client.snapshot()
-        timestamps = pd.to_datetime(
-            [row.get("received_at") for row in rows if row.get("value") is not None],
-            utc=True, errors="coerce",
-        ).dropna()
-        if timestamps.empty:
+        # A compact health response avoids downloading every contract for one label.
+        health = client.health()
+        timestamp = pd.to_datetime(health.get("latest_price_received_at"), utc=True, errors="coerce")
+        if timestamp is None or pd.isna(timestamp):
             return "unavailable"
-        return timestamps.max().tz_convert("Europe/London").strftime("%Y-%m-%d %H:%M:%S %Z")
+        return timestamp.tz_convert("Europe/London").strftime("%Y-%m-%d %H:%M:%S %Z")
     except RequestException:
         return "unavailable (live service unreachable)"
     finally:
@@ -121,6 +116,7 @@ def calculate_dashboard(
 ):
     log_dashboard(f"job {job_id} started ({'live refresh' if live_refresh else 'analysis'})")
     db = None
+    sznlty = None
     live = LiveMarketDataClient()
     try:
         signature = database_signature()
@@ -135,7 +131,16 @@ def calculate_dashboard(
             frames = {symbol: product_frames(symbol) for symbol in symbols}
             results = {key: value for key, value in dashboard_state["results"].items()
                        if key[0] in symbols}
+        requested=[full_structure(symbol,strategies[strategy]) for symbol in symbols
+            for strategies in universe['contracts'].values() for strategy in selected_columns]
+        live.replace(requested)
         for symbol in symbols:
+            expressions = list(dict.fromkeys(strategies[strategy]
+                for strategies in universe["contracts"].values() for strategy in selected_columns))
+            try:
+                live_quotes = live.quotes(symbol, expressions)
+            except (RequestException, KeyError, ValueError, TypeError):
+                live_quotes = {}
             for row, strategies in enumerate(universe["contracts"].values()):
                 for strategy in selected_columns:
                     expression = strategies[strategy]
@@ -159,9 +164,8 @@ def calculate_dashboard(
                     metrics, result = cached
                     if result is not None:
                         context = result["dashboard_context"]
-                        try:
-                            quote = live.expression(symbol, expression)
-                        except (RequestException, KeyError, ValueError, TypeError):
+                        quote = live_quotes.get(expression)
+                        if quote is not None and quote.get("value") is None:
                             quote = None
                         updated = Seasonality.refresh_live_result(
                             result, context["year"], quote, context["last_settlement"],
@@ -190,6 +194,8 @@ def calculate_dashboard(
         log_dashboard(f"job {job_id} failed")
         raise
     finally:
+        if sznlty is not None:
+            sznlty.close()
         if db is not None:
             db.close()
         live.close()
@@ -735,11 +741,15 @@ def update_rollover(selection):
     if not selection:
         return go.Figure()
     db = MarketData()
+    rollover=None
     try:
-        result = StrategyRollover(db).calculate(
+        rollover=StrategyRollover(db)
+        result = rollover.calculate(
             selection["symbol"], selection["expression"]
         )
     finally:
+        if rollover is not None:
+            rollover.close()
         db.close()
     return plotter.build_rollover_figure(
         result, f"{selection['strategy']} Strategy Rollover", height=610
@@ -748,19 +758,26 @@ def update_rollover(selection):
 @app.callback(
     Output("forward-curve-chart", "figure"),
     Input("selected-cell", "data"),
+    Input("live-chart-refresh", "n_intervals"),
     State('forward-curve-chart', "figure"),
 )
 @preserve_live_charts([0])
-def update_forward_curve(selection):
+def update_forward_curve(selection,_tick=0):
     if not selection:
         return go.Figure()
-    curve = ForwardCurve()
+    curve = None
     try:
+        curve = ForwardCurve()
         result = curve.calculate(selection["symbol"], selection["expression"])
-    except Exception:
-        result = {"live": [], "settlements": []}
+    except Exception as error:
+        log_dashboard(f"Forward curve unavailable: {error}")
+        figure = go.Figure()
+        figure.add_annotation(text=str(error), showarrow=False)
+        figure.update_layout(template="plotly_dark", paper_bgcolor="black", plot_bgcolor="black", height=610)
+        return figure
     finally:
-        curve.close()
+        if curve is not None:
+            curve.close()
     return plotter.build_forward_curve_figure(
         result, selection["symbol"], selection["expression"], height=610
     )

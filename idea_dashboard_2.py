@@ -14,7 +14,8 @@ from dash.exceptions import PreventUpdate
 
 from analysis.contract_universe import load_expiries
 from analysis.expression import format_contract_label
-from market_data import LiveMarketDataClient, MarketData
+from market_data.data_client import DataClient
+from market_data.workflow_client import WorkflowLiveClient,full_structure
 from market_data.queries import database_signature
 from dashboard_components.seac_builder import builder_layout, register_seac_callbacks
 
@@ -53,32 +54,20 @@ def rolling_pairs(now=None):
 
 
 def live_month_ticks(now=None):
-    """Nearest unexpired month pairs, using fresh matching CL/CO outright legs."""
+    """Request complete CL-CO structures from the shared quote resolver."""
     now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
-    client = LiveMarketDataClient(timeout=2)
+    client = WorkflowLiveClient('conditional-pairs')
     try:
-        if not client.health().get("status", "").startswith("CONNECTED:"):
-            return {}, "Live feed disconnected"
-        legs = {}
-        for row in client.snapshot(["CL", "CO"]):
-            try:
-                value = float(row["value"])
-                received = pd.to_datetime(row["received_at"], utc=True)
-                if isfinite(value) and value != -100 and pd.notna(received) and 0 <= (now-received).total_seconds() <= 120:
-                    legs[(row["product"], row["contract"])] = (value, received)
-            except (KeyError, TypeError, ValueError):
-                continue
+        pairs = rolling_pairs(now)
+        client.replace([full_structure('CL-CO',pair['first']+'-'+pair['second']) for pair in pairs])
+        quotes = client.quotes("CL-CO", [pair["first"] + "-" + pair["second"] for pair in pairs])
         result = {}
-        for pair in rolling_pairs(now):
-            month, first, second = pair["month"], pair["first"], pair["second"]
-            keys = [("CL", first), ("CO", first), ("CL", second), ("CO", second)]
-            if not all(key in legs for key in keys):
-                continue
-            values = [legs[key][0] for key in keys]
-            result[month] = {"live": int(round((values[0]-values[1]-values[2]+values[3])*100)),
-                             "contract": format_contract_label(f"{first}-{second}"),
-                             "live_asof": min(legs[key][1] for key in keys).isoformat()}
-        return result, f"Live prices: {len(result)}/12 pairs available | refreshed {now.strftime('%H:%M:%S UTC')}"
+        for pair in pairs:
+            quote = quotes.get(pair["first"] + "-" + pair["second"], {})
+            if quote.get("value") is not None:
+                result[pair["month"]] = {"live": int(round(quote["value"] * 100)),
+                                         "contract": pair["contract"], "live_asof": quote["timestamp"]}
+        return result, f"Quoted structures: {len(result)}/12 pairs available"
     except (RequestException, OSError, KeyError, TypeError, ValueError) as error:
         return {}, f"Live prices unavailable: {error}"
     finally:
@@ -234,11 +223,11 @@ def refresh_histogram_live(rows, graph_id, active_tab="conditional"):
 def histogram_results(filters, days, minute, signature):
     """Reuse results only while ranges, reference minute, and stored data are unchanged."""
     end = pd.Timestamp(minute)
-    db = MarketData()
+    client = DataClient()
     try:
-        return db.calendar_filter_histograms(dict(filters), end-pd.Timedelta(days=days), end)
+        return client.minute_histograms(dict(filters),start=end-pd.Timedelta(days=days),end=end)
     finally:
-        db.close()
+        client.close()
 
 
 def apply_filters(_clicks, rows, days, skip_months=3, active_tab="conditional"):

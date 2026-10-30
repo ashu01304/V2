@@ -1,444 +1,194 @@
-# Master Market Database
+# Market data and dashboard guide
 
-This package is the central data interface for the project. It downloads,
-updates, stores, and queries minute spread prices and daily SEAC settlements.
+## Project layout
 
-## First-time dashboard setup
-
-### Imported product selection
-
-Future historical and live writes use the selection in `market_data/config.py`:
-
-| SEAC product | Minute prefix |
+| Location | Purpose |
 | --- | --- |
-| CL | CL |
-| CO | LCO |
-| G | LGO |
-| HO | HO |
-| NG | NG |
-| RB | RB |
-| — | WTCL-LCO (retained direct CL–CO data) |
+| `main.py`, `dashboard.py`, `dashboard_components/` | Main dashboard and chart components |
+| `idea_dashboard.py` | Bid/ask curves and historical changes, port 8055 |
+| `idea_dashboard_2.py`, `idea_dashboard_2_assets/` | SEAC seasonality, port 8056 |
+| `seac_experiment.py`, `seac_experiment_assets/` | Experimental rolling statistics, port 8057 |
+| `market_data/` | Production data access, resolvers, live manager and historical imports |
+| `API/` | QH REST API client, authentication, cache and endpoint wrappers |
+| `diagnostics/` | Optional API chart comparison and standalone direct-feed tester |
+| `tests/` | Current regression checks; run manually |
+| `archive/` | Retired live bridge, original structure lab and historical tests |
+| `data/` | Master database, saved contract catalogue and other local data |
+| `analysis/` | Shared chart calculations using the common data client |
+| `Tools/` | Separate tools repository; unchanged |
 
-SEAC parsing skips other products. Minute parsing selects the original source
-columns for the allowed prefixes and skips all others before creating batches.
-Product matching is exact: NG does not include NGBF or NG-HH, and HO/RB do not
-include HOBF/RBBF. Both compressed and two-digit source years are recognized.
-The database writer also enforces this selection on registrations, historical
-prices, live prices/provenance, and settlements. Existing unwanted rows are not
-deleted or updated by these filters. Database cleanup remains a separate step.
+Archived files are retained for reference, with their original imports and paths.
+They are not maintained runnable entry points. The previous detailed README is
+saved as `archive/legacy_live/previous_market_data_README.md`. Do not run archived
+live servers alongside the production manager.
 
-The source URLs return bulk files, so the full files still download. Filtering
-limits saved data rather than requesting smaller downloads. Restart existing
-live services/importers to load the new code. No import is triggered by editing
-these settings. Offline checks (no API calls or master-database writes):
+## Run the current system
 
-```powershell
-.\.venv\Scripts\python.exe -m unittest tests.test_import_filters
-```
-
-### Existing-data cleanup
-
-The one-off maintenance command is `python -m market_data.cleanup`. It takes the
-shared writer lock, creates a full backup in `data/backups/`, checks its SHA-256,
-and rebuilds the four master tables into a new compact database. Table schemas,
-indexes, retained registry timestamps and live provenance are preserved. Each
-table is verified against the filtered backup using row count and two data-hash
-aggregates, and the completed file is reopened before atomic publication.
-The JSON cleanup report is saved alongside the backup. No source API is called.
-
-This command changes the active database and should only be run when cleanup is
-intended. It needs free disk space for the backup and working copy; its full-index
-rebuild uses a separate 2 GB memory limit and one thread. Incremental imports keep
-their usual memory limit. `--resume-backup PATH` reuses a prior cleanup backup only
-if it still matches the master; otherwise it takes a fresh backup. Restart running
-services/importers after code changes to ensure they use the import filters.
-
-From the project root (`V2`), install all Python dependencies:
+Run commands from the project root, using a separate terminal for each process.
+Start exactly one shared manager:
 
 ```powershell
-python -m pip install -r requirments.txt
+.\.venv\Scripts\python.exe -B -m market_data.live_server
 ```
 
-The tracked `data/contract_universe_config.json` selects CL, nine consecutive nearby
-contracts, and March/June/September/December deferred contracts over three
-calendar years. Edit these settings to choose a different universe.
+Its quote API and subscription monitor are at **http://127.0.0.1:8071**.
+Use `market_data.live_server` as the single service startup command; the redundant
+`live_service.py` launcher has been removed.
+The single-instance lock prevents duplicate managers using its registry.
 
-Before starting the dashboard, restore an existing `data/master_database.duckdb`
-or run the updater while connected to the corporate network:
+Then start whichever dashboards you need:
+
+| Dashboard | Command after `.\.venv\Scripts\python.exe -B` | Port |
+| --- | --- | --- |
+| Main | `main.py` | 8050 |
+| Bid/ask curves | `idea_dashboard.py` | 8055 |
+| SEAC seasonality | `idea_dashboard_2.py` | 8056 |
+| SEAC experiment | `seac_experiment.py` | 8057 |
+| Live structure watchlist | `-m market_data.live_dashboard` | 8070 |
+
+Restart running dashboards after this cleanup. The old
+`python -m structure_lab.dashboard` command is replaced by
+`python -m market_data.live_dashboard`.
+
+Optional diagnostics:
 
 ```powershell
-python -m market_data.watch
+.\.venv\Scripts\python.exe -B -m diagnostics.api_dashboard
+.\.venv\Scripts\python.exe -B -m diagnostics.standalone_live_quote_tester
 ```
 
-Wait for the update to finish; the command exits after one import. Run it
-manually whenever you want to refresh downloaded history (for example, daily).
-Then start the dashboard:
+The API chart tester uses **8058**, avoiding the SEAC experiment's 8057 port.
+The standalone quote tester uses **8059** and explicitly opens its own direct
+streamer connections when Subscribe is clicked. It is independent of the shared
+manager. Its saved catalogue remains in `data/`; nothing is fetched on startup.
+For QH login, endpoint probes and dependencies, see `API/README.md`.
+
+## Data flow
+
+Dashboards send complete structures through `DataClient` in `data_client.py`:
+
+- `seac_resolver.py` reconstructs aligned settlement histories.
+- `minute_resolver.py` finds available stored spread recipes and returns minute
+  prices or candles. Missing observations remain missing.
+- `live_resolver.py` requests shared published quotes from the HTTP manager.
+
+`structure_parser.py` parses named structures and converts legacy expressions.
+`workflow_client.py` contains shared dashboard batching, session windows,
+minute-history helpers and compatibility calls to the common data client.
+`analysis/seasonality.py`, `analysis/forward_curve.py` and `analysis/rollover.py`
+now request complete structures themselves while retaining chart/calendar logic.
+Their duplicate `market_data/structure_*` adapter classes have been removed;
+dashboards import these analysis classes directly. Live prices always come from
+the shared manager; these classes do not reconstruct live prices from outrights
+or substitute stored minute observations for a live quote.
+
+The live manager stores **one normalized structure, one calculation stream and
+one published quote per unique structure**. Dashboard ownership is not tracked.
+Every registration or quote read renews its expiry to 8 hours from that demand.
+Monitor/status reads do not renew it. Closing a dashboard or removing a selection
+leaves its shared quote until inactivity expiry. Required TT IDs are deduplicated
+across all structures and removed only when no active structure needs them.
+
+`live_resolver.py` contains live component recipes and the HTTP quote client;
+`quote_catalogue.py` indexes saved candidate IDs;
+`live_request_store.py` maintains temporary shared demand;
+`live_manager.py` resolves subscription requirements, coordinates shared
+subscriptions and publishes results; `live_feed.py` handles the streamer;
+`live_pricing.py` calculates fallback prices and optimizes bid/ask sides;
+`live_server.py` serves HTTP quotes and the monitor.
+Chart refresh helpers live in `dashboard_components/chart_updates.py`.
+On the 8055 chart, bid/ask point hovers show the signed quoted components,
+book side and component price used. Only callers requesting `include_recipes`
+receive this compact breakdown; other quote responses stay unchanged.
+
+The manager also publishes `alternatives`: unranked exact constructions, each
+with paired bid/ask, midpoint, sizes, component IDs/names/weights and side timestamps.
+The same component quantities are used for both sides of each construction.
+Request `include_alternatives: true` on `POST /quotes` for compact responses,
+or call `DataClient.live(structure, include_alternatives=True)` (also supported
+by `live_many`). Full responses include the list automatically.
+Routes cover direct, named (such as quoted flies) and spread reconstructions,
+plus mixes discovered by the existing search. Exact recipes are deduplicated;
+enumeration is capped at 64 combinations per route and reports
+`alternatives_truncated`. The list is not an exhaustive search of every possible mix.
+Existing single-quote fields remain for compatibility with other dashboards.
+
+On 8057, blue and yellow bands show the minimum-to-maximum available bid and ask
+separately, with price labels and construction details on hover. A band can span
+different constructions; its endpoints are not one paired quote. A single value
+collapses the band to a line. Empty/stale alternatives hide the corresponding band.
+The existing reference midpoint still supplies the current-year observation and
+rolling statistics. Range endpoints are not inserted as historical observations.
+
+Available prices are published even when best-side optimization is unconfirmed.
+`average`/`mid` is `(bid + ask) / 2`. Timestamps reflect the oldest received
+component used, not the recalculation time. Outright live subscriptions are
+intentionally unsupported. Subscription changes reuse streamer sessions.
+
+## Configuration and stored data
+
+`market_data/config.py` contains `LIVE_MANAGER_URL`, the database path and import
+product filters. Restart processes after changing configuration.
+The retired `live_subscription_config.json` is now under `archive/legacy_live/`;
+it does not control the demand-driven manager.
+
+The master remains `data/master_database.duckdb`. Shared live requests use
+`market_data/runtime/structure_requests.sqlite3`. The manager also records actual
+post-snapshot updates of directly quoted calendar spreads: the last valid bid/ask
+midpoint received within each UTC minute, without forward-filling quiet minutes.
+Only subscribed spreads for the retained products are recorded; flies, boxes and
+dashboard-computed alternatives are not written as calendar-spread observations.
+No extra subscriptions or outright prices are needed.
+
+The durable buffer is `data/live_minute_buffer.sqlite3`, using a new
+`quoted_minute_closes` table. Older outright-buffer rows are left untouched.
+The recorder is implemented in `live_request_store.py`, alongside the temporary
+live storage, and starts/stops with the manager. It flushes memory to SQLite each
+second, then publishes completed minutes every **10 minutes** by default.
+`LIVE_MINUTE_PUBLISH_SECONDS` in `config.py` controls that interval (minimum 60s).
+Publication copies the master, takes the same writer lock used by `watch.py`,
+registers retained-product spread instruments and atomically replaces the master.
+Dashboards see these points after publication, not immediately on receipt.
+
+`live_spread_keys` marks these observations as provisional. Live recording never
+overwrites imported historical values. The existing `watch.py` importer includes
+the provisional period in its overlap, replaces matching points with downloaded
+history and removes their provisional keys. If the importer holds the writer lock
+or publication fails, buffered closes stay queued for retry. The buffer is
+acknowledged only after successful publication (or when history already has the
+points). Quote midpoints are provisional observations, not executed trade prices.
+The 8071 monitor and `/status` show received/queued counts, publication time,
+published point count and recorder errors. Credentials remain in memory and `.env` stays local.
+The quoted contract catalogue remains
+`data/quoted_live_probe_full_20261029_131318.json`.
+
+Historical imports retain CL, CO, G, HO, NG and RB, with minute aliases LCO and
+LGO, plus the retained WTCL-LCO intermarket spread. Import filters are in
+`config.py`. `database.py`, `spreads.py`, `settlements.py` and `sync.py` handle
+storage/imports; `queries.py` and `reader_snapshots.py` handle dashboard reads;
+`publication.py` handles locking and publication.
+
+The existing historical updater command is unchanged:
 
 ```powershell
-python main.py
+.\.venv\Scripts\python.exe -B -m market_data.watch
 ```
 
-Open http://127.0.0.1:8050 in your browser.
+It is separate from the live manager. `diagnostics.cleanup_database` is an
+explicit master-data maintenance tool, not part of source cleanup or normal
+startup. The old `market_data.cleanup` command has been replaced by that module.
 
-## Independent ideas canvas
+## Manual verification
 
-Run `python idea_dashboard.py` and open http://127.0.0.1:8055 (or use `--port`).
-This standalone chart plots one live reference-price line for
-CL, CO, G, HO, NG, RB or CL-CO. Choose **Outright / single month**, **Calendar spread** (1:-1) or **Butterfly**
-(1:-2:1), and a leg spacing of 1-24 calendar months. Each point rolls the starting
-month forward by one month. For example, a 2-month spread is Z26-G27; a 2-month
-fly is Z26-2*G27+J27. For CL-CO each month is itself CL minus CO, creating
-four-leg spreads or six-leg butterflies. CL-CO remains the default. Outright mode
-plots each contract's own server reference value; CL-CO single-month mode is the
-calculated CL-minus-CO difference. Spacing is disabled for outright mode.
-The server reference is admin price, falling back to last trade, then midpoint.
-Spreads and flies are calculated from these reference values, as in the original
-single-line chart; this view does not subscribe to directly quoted structures.
-HO and RB show four decimals, NG three, and other products two. Product, structure,
-spacing, starting-month count and "Skip first N months" persist in the browser.
-Contract generation uses the selected product's expiry calendar; CL-CO uses
-months unexpired in both calendars. Missing later months leave gaps rather than
-shifting a structure to different calendar months.
-The plot updates every 10 seconds from one shared live snapshot for the selected
-product (CL and CO together for CL-CO), with missing or
-stale prices left as gaps. Snapshots older than 120 seconds, future-dated
-receipts and invalid reference values are excluded. Drag a box to zoom; mouse-wheel zoom is disabled.
-Zoom stays in place during live refreshes. Series details appear on hover.
-The collapsible price-change table and four direction boxes compare live prices
-with stored prices 15 minutes, 30 minutes, 1 hour, and 2 hours earlier. This section
-ignores the skip setting and follows the selected product, structure and spacing.
-Up or Down requires strictly more than 50% of structures
-with available data; unchanged spreads count in the denominator. History is fetched
-in one cached read-only query per reference minute, month range, or database version.
-The master database stores minute spreads rather than outright minute prices,
-so outright mode shows its live values but leaves historical changes blank.
-Missing data stays blank. Changing product, structure or spacing resets chart zoom;
-timed refreshes preserve it. The chart has no historical lines, error plots, or entry signals. A single
-multi-select dropdown optionally overlays linear, quadratic, cubic least-squares
-fits or a smooth spline with fixed smoothing strength, using the same live
-reference prices as the plotted line. Curves and table values use the selected
-product's display precision; there are no extra fitting controls, and selections persist.
-
-Offline checks: `python -m unittest tests.test_idea_structures tests.test_intraday_data.IdeaLivePlotTests`.
-Restart the live service if it is still running the older three-product selection
-so quotes for all six selected products are subscribed.
-
-## SEAC seasonality dashboard
-
-Run `python idea_dashboard_2.py` and open http://127.0.0.1:8056 (or use `--port`).
-The dashboard opens directly to SEAC settlement seasonality using a product selector
-and monthly contract cells, initially all empty. Click a cell's value to open Count and Structure (outright,
-calendar spread, fly, or defly) in a small popup. Click outside, close it, or select
-another month to save automatically. Each cell keeps its own structure label
-(for example `1 Fly`); legs are expanded and combined only for the calculation.
-Drag a filled value to another month to move its count and structure. The source
-is cleared and an existing selection in the destination is replaced.
-Fly weights are `1,-2,1`; Defly uses `1,-3,3,-1` across consecutive months.
-Set Count to zero to clear that cell. Hover over Count and
-scroll up/down to increase/decrease it without clicking. Click a month label
-(such as H27) to clear only that block; click its value to open the editor.
-Scroll over Structure to cycle through
-Outright, Spread, Fly, and Defly. Enter the number of latest contract years
-to display, ending with the selected expression's first net leg (for example
-H27 with `4` years means 2024–2027). Cross-year structures keep this anchor year;
-Z26–F27 ends at 2026. The exclusion dropdown follows the same contract-year range.
-Check any years to exclude in the **Exclude years** dropdown, and enter a numeric lookback in
-working days, then press **Plot**. All years align to expiry. Average and zero-base
-options apply to the year overlays, which are always used for the chart.
-The builder in `dashboard_components/seac_builder.py` reuses the existing
-seasonality engine and plotter in `analysis/`. Historical lines use daily settlements.
-A small green dot shows the selected expression's live price from the local
-server on port 8060, refreshed every 10 seconds without reloading historical lines.
-The dot follows the expiry axis and zero-base setting. Missing quotes,
-quotes older than two minutes, and excluded anchor years have no live dot.
-Settlement volume and open interest are unavailable.
-
-## Running the live market-data service
-
-From the project root, start the service for the six selected products:
+No tests, dashboards, application imports or database queries were run by the
+coding agent during this cleanup. With the manager running, use:
 
 ```powershell
-.\.venv\Scripts\python.exe market_data\live_service.py
+.\.venv\Scripts\python.exe -B -m diagnostics.manual_check --structure "CL X27 1MS" --structure "CO X27 1MS"
 ```
 
-The service listens on `http://127.0.0.1:8060`. Press Ctrl+C to stop it. Run
-the command while connected to the corporate network and after installing the
-`lightstreamer-client-lib` dependency.
-
-The default and allowed live products are CL, CO, G, HO, NG and RB, configured
-in `market_data/config.py`. Use `--products CL CO` to request a smaller subset.
-Other products are rejected before any instrument request. BRN/LCO are accepted
-as aliases for CO, and LGO for G. The corporate instrument request uses BRN for
-CO; incoming BRN/LCO map to CO and incoming LGO maps to G. Minute recording maps
-CO to the stored LCO prefix and G to LGO, including compressed one-digit years.
-The service no longer discovers subscriptions from every SEAC symbol. Restart
-an already-running service for the new subscription selection to take effect.
-This change does not prune or rewrite existing master data, including WTCL-LCO.
-
-The live service also records the last valid received price within each UTC
-minute. It buffers those closes in `data/live_minute_buffer.sqlite3` and publishes
-completed minutes to the master database every 10 minutes. The feed callback
-only updates a small in-memory buffer; a separate worker commits it to SQLite
-about once per second. Restart the live service after upgrading to enable this.
-
-A minute is labelled by its start: `10:05:00 UTC` stores the last valid update
-received before `10:06:00 UTC`. Missing minutes remain missing. Initial subscription
-snapshots are not treated as new price observations. Incomplete minutes are not
-published, and prices retain their full precision.
-
-The master stores spreads, so the recorder subtracts the two outright minute
-closes for existing `spread_instruments`. Both legs must have a valid observation
-in the same minute. No stale leg is carried forward. CO maps to the existing LCO
-source symbols. The expiry calendar maps each compressed one-digit code to the
-earliest unexpired full-year contract, so a far-decade quote cannot replace a
-missing near-decade observation. Without a calendar match, ambiguous codes are
-skipped rather than guessed.
-Larger chart candles aggregate these minute prices, not every underlying tick.
-
-Main table analysis is cached by product, expression, and selected years. Ordinary
-10-second refreshes reuse settlement baselines and historical-year series, request
-live expression quotes, and replace the current live point without opening a
-master-database connection. Database publications and UTC date changes invalidate
-that cache; changed year selections load the appropriate analysis. If the live
-service is unavailable, the last cached values remain visible until recovery.
-
-Open main-dashboard minute charts check the master file signature on their live
-refresh timer. They reload history only after a database publication; ordinary
-ticks update the live markers without querying minute history. Closed popups
-do not request chart data.
-
-Published live minutes are provisional. Downloaded records always win for the
-same instrument and UTC minute. A manual historical import replaces matching
-provisional rows and retains newer live rows or live rows absent from the download.
-Live writes cannot overwrite a downloaded minute. Successful publication removes
-consumed closes from the SQLite buffer; failed or blocked publication retains
-them and retries after about a minute. A graceful stop attempts a final publish
-of completed minutes and retains the incomplete minute for recovery.
-
-The `/health` response includes `minute_recording`: worker status, queued closes,
-last publication time, accepted spread count and the latest recording error.
-
-## Database
-
-The database is stored at:
-
-```text
-data/master_database.duckdb
-```
-
-It contains:
-
-- `spread_prices(timestamp, instrument, price)`
-- `spread_instruments(instrument, first_seen, last_seen)`
-- `seac_settlements(symbol, contract_code, trading_date, price)`
-- `live_spread_keys(timestamp, instrument)` identifies provisional live rows
-
-Exact `-100` spread values are treated as unavailable and are not stored.
-Negative values other than `-100` are valid prices.
-
-## Requirements
-
-```powershell
-pip install duckdb pandas requests ijson
-```
-
-The corporate Insight certificate is not available to Python, so both internal
-downloads currently use `verify=False` and suppress the related warning.
-
-## Running the updater
-
-Every invocation runs one update and exits. The older `--once` option remains
-accepted for compatibility. A failed update exits with code 1 and prints the
-traceback. The final database appears only after the complete import succeeds.
-
-There is one operational entry point:
-
-```powershell
-python -m market_data.watch
-```
-
-Running the command downloads minute spreads and SEAC settlements once. It does
-not schedule further downloads; continuous minute recording belongs to the live
-service.
-
-Contract expressions are generated at runtime from `data/expiry_dates.csv` and
-`data/contract_universe_config.json`; no generated contract-list file is needed.
-Add custom structures to `custom_structures` in the config, for example:
-
-```json
-{"name": "C6", "coefficients": [1, 0, -1, -1, 0, 1], "steps": [1]}
-```
-
-The coefficients use consecutive expiry positions; zeroes skip legs. The
-coefficient sum must be zero for minute data reconstructed from stored spreads.
-
-Only one watcher can run at a time. Progress and errors are written to
-`data/market_data_sync.log`.
-
-The full source files are downloaded because neither source provides a known
-incremental endpoint. New/recent spread records, outstanding provisional live
-minutes, and new or revised SEAC settlements are processed. Downloaded files are deleted after processing.
-
-Updates never modify the master database directly. A temporary copy is updated,
-checkpointed, and closed first. Only a completely successful copy replaces the
-master. If the process stops or fails, the existing master remains unchanged.
-
-## Dashboard reads during updates
-
-Dashboards use read-only, per-process database snapshots in the system temporary
-folder. A snapshot is reused until the master database changes; new `MarketData`
-connections then receive a new snapshot. Existing connections finish against
-their original snapshot and must be reopened to see refreshed data.
-
-Each dashboard process needs disk space for its own database copy, and its first
-connection after an update incurs the copy cost. Unused older snapshots are
-removed when their readers close. Reader DuckDB buffers are configured for
-512 MB and two threads. The historical importer and live-minute publisher share
-an OS writer lock for the entire copy/update/publish operation. A live publish
-waits for the next retry when a manual import owns that lock; recording continues
-in SQLite. Both publish a checkpointed, closed copy atomically and retry file
-replacement for up to 30 seconds during brief reader copies. Reopen a reader to
-see the latest completed publication.
-
-## Reading spread data
-
-```python
-from market_data import MarketData
-
-data = MarketData()
-frame = data.spread("CLV26-X26")
-data.close()
-```
-
-With an optional time range:
-
-```python
-frame = data.spread(
-    "CLV26-X26",
-    start="2026-03-01",
-    end="2026-04-01",
-)
-```
-
-List available spreads:
-
-```python
-cl_spreads = data.spreads("CL%")
-```
-
-## Reading SEAC settlements
-
-```python
-from market_data import MarketData
-
-data = MarketData()
-frame = data.settlement("CO", "Z26")
-data.close()
-```
-
-## Building contracts from stored spreads
-
-Complex zero-sum contracts can be requested directly without loading each
-spread in application code:
-
-```python
-from market_data import MarketData
-
-data = MarketData()
-
-# CLV26 - 3*CLX26 + 3*CLZ26 - CLF27
-minute = data.synthetic("CL", "V26-3*X26+3*Z26-F27")
-candles = data.synthetic_ohlc(
-    "CL", "V26-3*X26+3*Z26-F27", interval="30min"
-)
-
-data.close()
-```
-
-The example is decomposed automatically into:
-
-```text
-1 * CLV26-X26 - 2 * CLX26-Z26 + 1 * CLZ26-F27
-```
-
-Butterflies work through the same interface:
-
-```python
-butterfly = data.synthetic("CL", "V26-2*X26+Z26")
-```
-
-Only zero-sum expressions can be created from spreads alone. An expression
-whose coefficients do not sum to zero requires an outright price and is
-rejected.
-
-Always close the read-only connection when finished, preferably using `try` /
-`finally`, especially before publishing an update on Windows.
-
-## One-digit expiry years
-
-Some source symbols use two-digit years, such as `CLV26-X26`, while others use
-one digit, such as `LCOV6-X6` or `LCOZ9-F0`. The database deliberately preserves
-the raw source symbol and does not guess the decade. For example, in the current
-contract cycle `Z9-F0` likely represents December 2029 to January 2030, but that
-interpretation depends on the reference decade. Any future normalization must
-store the raw symbol and apply an explicit reference-year rule.
-
-## Operational notes
-
-- DuckDB supports one writer; project applications should open read-only queries.
-- Close readers before the final database replacement if Windows reports that
-  the file is in use.
-- Do not delete `.tmp` or `.incoming` files while an update is running.
-- A retained temporary database after failure can be inspected, while the master
-  remains safe.
-- Contract construction and synthetic structures consume the existing stored
-  spread format. Outright closes exist only in the recoverable SQLite buffer
-  until their completed-minute batch is consumed.
-- Keep free disk space for one working master copy during publication and the
-  per-process reader snapshots. A live publication creates a new master version
-  at most every 10 minutes, plus a final attempt during graceful shutdown.
-
-## Code responsibilities and regression checks
-
-- market_data/queries.py is the read-only master database interface. It owns all
-  read SQL, including product/contract lists, settlement snapshots, matching-minute
-  expression prices, bounded candle aggregation, and batched expression ranges.
-  database_status() and database_signature() expose file status without opening SQL
-  connections or copying snapshots; dashboards use them for update labels and caches.
-- market_data/database.py is the master writer interface. Historical imports and
-  live-minute publication use its named methods; writer metadata queries stay here.
-- market_data/intraday.py handles session windows and convenient reader lifetimes,
-  delegating data requests to MarketData.
-- market_data/contracts.py owns expression-to-spread recipes.
-- market_data/live_client.py owns live-price requests and optional quote fetching.
-- analysis/intraday_chart.py and analysis/session_overlay.py build reusable figures.
-- dashboard_components/ owns Dash layout, callbacks, browser stores, and endpoints.
-- tests/ contains automated regression checks. testing/ contains the older
-  interactive range-testing app, which still requires the removed product_config.py.
-  The retained backtesting execution chain also requires the removed feature module.
-
-Run regression checks from the project root:
-
-~~~powershell
-.\.venv\Scripts\python.exe -B -m unittest discover -s tests -p "test_*.py"
-node tests/bookmark_indicator_check.js
-node tests/live_marker_check.js
-~~~
-
-## Database access boundary
-
-Application code should call named methods on MarketData or MasterDatabase rather
-than access a DuckDB connection or cursor. Both interfaces keep their connections
-private. Examples: symbols(), contract_codes(), latest_settlement_date(),
-settlements_on(), expression_minutes(), expression_candles(), expression_ranges(),
-save_spreads(), save_settlements(), and save_live_spreads().
-
-Dashboard and analysis modules do not import DATABASE_PATH or inspect the master
-file directly. Use database_status() for its UTC update time or existence and
-database_signature() for cache invalidation. Signatures contain strings so browser
-number rounding cannot trigger repeated history reloads.
-
-Database copying, publication locks, and reader snapshots remain internal to
-market_data; updater orchestration coordinates these helpers and the writer.
-The live recorder's private SQLite spool is separate from the master DuckDB file;
-its buffer SQL remains internal to live_history.py.
+Open two dashboards and request the same structure: the 8071 monitor should show
+one row. Change one dashboard selection and confirm the other still updates.
+Check the main curve, SEAC live marker, minute candles and 8055 bid/ask lines.
+Missing historical coverage remains an explicit no-data result. Archived tests
+refer to retired interfaces and are excluded from the current `tests/` folder.

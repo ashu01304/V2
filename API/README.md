@@ -99,10 +99,10 @@ authentication-shaped response fields are redacted. Errors omit response bodies.
 ### Local testing dashboard
 
 ```powershell
-.\.venv\Scripts\python.exe api_testing_dashboard.py
+.\.venv\Scripts\python.exe -m diagnostics.api_dashboard
 ```
 
-Open http://127.0.0.1:8057. Select a stored contract or enter another QH code,
+Open http://127.0.0.1:8058. Select a stored contract or enter another QH code,
 choose a common interval (1m, 5m, 1h, 1d) and candle count, then click **Plot / refresh**.
 The optional end time is UTC; blank uses now. The charts use the same completed
 UTC buckets, excluding the currently forming bucket. There is no automatic polling.

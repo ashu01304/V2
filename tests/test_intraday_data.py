@@ -6,7 +6,7 @@ import unittest
 import duckdb
 import pandas as pd
 
-from market_data.intraday import load_candles
+from market_data.workflow_client import load_candles
 
 
 class IntradayQueryTests(unittest.TestCase):
@@ -76,15 +76,15 @@ class IdeaLivePlotTests(unittest.TestCase):
 
     def test_single_live_line_keeps_month_positions_rounding_and_zoom(self):
         figure = self.canvas.make_figure(["Z26", "F27", "G27", "H27"],
-                                        {"Z26": .333, "F27": .2, "H27": .1})
-        self.assertEqual(len(figure.data), 1)
-        self.assertEqual(figure.data[0].name, "Live")
+                                        {"Z26-F27": {"value": .133,"bid": .13,"ask": .15}})
+        self.assertEqual(len(figure.data), 2)
+        self.assertEqual(figure.data[0].name, "Best bid")
         self.assertEqual(list(figure.data[0].y), [.13, None, None])
         self.assertEqual(list(figure.data[0].x), [0, 1, 2])
         self.assertEqual(list(figure.layout.xaxis.ticktext),
                          ["Dec 26-Jan 27", "Jan 27-Feb 27", "Feb 27-Mar 27"])
         self.assertFalse(figure.data[0].connectgaps)
-        self.assertFalse(figure.layout.showlegend)
+        self.assertTrue(figure.layout.showlegend)
         self.assertEqual(figure.layout.dragmode, "zoom")
         self.assertEqual(figure.layout.uirevision, "CL-CO:spread:1:Z26:F27:G27:H27")
         self.assertEqual(figure.layout.yaxis.tickformat, ".2f")
@@ -92,8 +92,8 @@ class IdeaLivePlotTests(unittest.TestCase):
     def test_missing_live_prices_show_an_empty_plot_message(self):
         for contracts in ([], ["Z26", "F27"]):
             figure = self.canvas.make_figure(contracts, {})
-            self.assertEqual(len(figure.data), 1)
-            self.assertEqual(figure.layout.annotations[0].text, "No matching live prices available")
+            self.assertEqual(len(figure.data), 2)
+            self.assertEqual(figure.layout.annotations[0].text, "No matching bid/ask quotes available")
 
     def test_month_selection_skips_calendar_months_across_year_boundary(self):
         from datetime import date
@@ -103,56 +103,25 @@ class IdeaLivePlotTests(unittest.TestCase):
             self.assertEqual(self.canvas.consecutive_contracts(2, date(2026, 10, 26), 1),
                              ["F27", "G27", "H27"])
 
-    def test_live_reference_values_supply_plot_without_bid_ask(self):
+    def test_live_reference_values_supply_plot_from_complete_quote(self):
         from unittest.mock import patch
-        now = pd.Timestamp("2026-10-28T12:00Z")
-        records = [{"product": product, "contract": code, "value": value,
-                    "received_at": now.isoformat()}
-                   for product, code, value in [("CL", "Z26", 75),
-                    ("CO", "Z26", 73), ("CL", "F27", 74), ("CO", "F27", 72.1)]]
         with patch.object(self.canvas, "LiveMarketDataClient") as factory:
             client = factory.return_value
-            client.health.return_value = {"status": "CONNECTED:WS-STREAMING"}
-            client.snapshot.return_value = records
-            reference, _ = self.canvas.live_prices(now)
+            client.quotes.return_value = {"Z26-F27": {"value": .1,"bid": .09,"ask": .11}}
+            reference, _ = self.canvas.live_prices(expressions=["Z26-F27"], with_sides=True)
             figure = self.canvas.make_figure(["Z26", "F27"], reference)
-            self.assertEqual(list(figure.data[0].y), [.1])
-            client.snapshot.assert_called_once_with(["CL", "CO"])
+            self.assertEqual(list(figure.data[0].y), [.09])
+            client.quotes.assert_called_once_with("CL-CO", ["Z26-F27"], best_sides=True)
+            client.snapshot.assert_not_called()
             client.close.assert_called_once()
 
-    def test_stale_future_or_invalid_reference_values_are_excluded(self):
+    def test_missing_resolved_price_leaves_curve_gap(self):
         from unittest.mock import patch
-        now = pd.Timestamp("2026-10-28T12:00Z")
-        for stamp, value in [(now - pd.Timedelta(seconds=121), 75),
-                             (now + pd.Timedelta(seconds=1), 75), (now, -100), (now, float("nan"))]:
-            records = [{"product": "CL", "contract": "Z26",
-                        "received_at": stamp.isoformat(), "value": value},
-                       {"product": "CO", "contract": "Z26",
-                        "received_at": now.isoformat(), "value": 73}]
-            with self.subTest(stamp=stamp, value=value), patch.object(self.canvas, "LiveMarketDataClient") as factory:
-                factory.return_value.health.return_value = {"status": "CONNECTED:WS-STREAMING"}
-                factory.return_value.snapshot.return_value = records
-                reference, _ = self.canvas.live_prices(now)
-                self.assertEqual(reference, {})
-
-    def test_stale_or_missing_live_legs_do_not_supply_prices(self):
-        from unittest.mock import patch
-        now = pd.Timestamp("2026-10-26T12:00Z")
-        records = [
-            {"product": product, "contract": code, "value": value, "received_at": stamp}
-            for product, code, value, stamp in [
-                ("CL", "Z26", 75., "2026-10-26T12:00Z"),
-                ("CO", "Z26", 73., "2026-10-26T12:00Z"),
-                ("CL", "F27", 74., "2026-10-26T12:00Z"),
-                ("CO", "F27", 72., "2026-10-26T11:50Z"),
-                ("CL", "G27", -100., "2026-10-26T12:00Z")]]
         with patch.object(self.canvas, "LiveMarketDataClient") as factory:
-            client = factory.return_value
-            client.health.return_value = {"status": "CONNECTED:WS-STREAMING"}
-            client.snapshot.return_value = records
-            prices, _ = self.canvas.live_prices(now)
-            self.assertEqual(prices, {"Z26": 2.})
-            client.close.assert_called_once()
+            factory.return_value.quotes.return_value = {"Z26-F27": {"value": None, "error": "No fresh quoted components"}}
+            reference, _ = self.canvas.live_prices(expressions=["Z26-F27"], with_sides=True)
+            figure = self.canvas.make_figure(["Z26", "F27"], reference)
+            self.assertEqual(list(figure.data[0].y), [None])
 
     def test_directional_history_is_batched_and_cached_for_all_four_times(self):
         from unittest.mock import Mock, patch
@@ -178,7 +147,7 @@ class IdeaLivePlotTests(unittest.TestCase):
         canvas = self.canvas
         with patch.object(canvas, "database_signature", return_value=("v1",)), \
              patch.object(canvas, "_historical_changes", return_value={15: [.084, None], 30: [.12, .1]}):
-            rows = canvas.change_rows(["Z26", "F27", "G27"], {"Z26": .3, "F27": .2})
+            rows = canvas.change_rows(["Z26", "F27", "G27"], {"Z26-F27": .1})
         self.assertEqual(rows[0]["change-15"], .02)
         self.assertEqual(rows[0]["change-30"], -.02)
         self.assertIsNone(rows[0]["change-120"])
@@ -196,20 +165,20 @@ class IdeaLivePlotTests(unittest.TestCase):
     def test_simple_dropdown_fits_selected_curves_with_rounded_points(self):
         canvas = self.canvas
         codes = ["Z26", "F27", "G27", "H27", "J27", "K27"]
-        prices = {code: float(25 - index**2)
-                  for index, code in enumerate(codes)}
+        prices = {f"{first}-{second}": {"bid": float(2*index+1)-.01, "ask": float(2*index+1)+.01}
+                  for index, (first, second) in enumerate(zip(codes, codes[1:]))}
         for curve in canvas.FIT_OPTIONS:
             figure = canvas.make_figure(codes, prices, [curve])
-            self.assertEqual(len(figure.data), 2)
-            self.assertEqual(figure.data[1].name, canvas.FIT_OPTIONS[curve])
-            self.assertTrue(all(value == round(value, 2) for value in figure.data[1].y))
+            self.assertEqual(len(figure.data), 3)
+            self.assertEqual(figure.data[2].name, canvas.FIT_OPTIONS[curve])
+            self.assertTrue(all(value == round(value, 2) for value in figure.data[2].y))
         figure = canvas.make_figure(codes, prices, ["linear", "quadratic", "linear"])
-        self.assertEqual(len(figure.data), 3)
-        quadratic = figure.data[2]
+        self.assertEqual(len(figure.data), 4)
+        quadratic = figure.data[3]
         self.assertAlmostEqual(quadratic.y[0], 1.)
         self.assertAlmostEqual(quadratic.y[-1], 9.)
         short = canvas.make_figure(codes[:2], prices, ["cubic", "spline"])
-        self.assertEqual(len(short.data), 1)
+        self.assertEqual(len(short.data), 2)
         self.assertEqual(len(short.layout.annotations), 2)
 
     def test_dashboard_callback_has_only_live_plot_controls(self):
@@ -228,8 +197,8 @@ class IdeaLivePlotTests(unittest.TestCase):
                 "state": [], "changedPropIds": ["idea-tick.n_intervals"]})
             self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
             contracts.assert_called_once_with(5, product="CL-CO")
-            live.assert_called_once_with(product="CL-CO")
-            self.assertEqual(len(response.get_json()["response"]["idea-chart"]["figure"]["data"]), 1)
+            live.assert_called_once_with(product="CL-CO", expressions=["Z26-F27", "F27-G27"], with_sides=True)
+            self.assertEqual(len(response.get_json()["response"]["idea-chart"]["figure"]["data"]), 2)
             self.assertEqual(len(response.get_json()["sideUpdate"]["idea-changes-table"]["data"]), 2)
             self.assertEqual(len(response.get_json()["sideUpdate"]["idea-trend-boxes"]["children"]), 4)
             self.assertEqual(set(canvas.app.callback_map), {"idea-chart.figure"})

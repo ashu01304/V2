@@ -21,18 +21,13 @@ class LiveProductTests(unittest.TestCase):
                 get_instruments(["CL", "GC"])
             request.assert_not_called()
 
-    def test_aliases_batched_once_and_unrequested_rows_excluded(self):
-        payload = {"data": [
-            {"product": "BRN", "qh_code": "COZ26", "instid": 1},
-            {"product": "LGO", "qh_code": "GZ26", "instid": 2},
-            {"product": "GC", "qh_code": "GCZ26", "instid": 3},
-        ]}
-        with patch("market_data.live_service.urlopen", return_value=io.StringIO(json.dumps(payload))) as request:
+    def test_aliases_use_saved_structures_without_catalogue_request(self):
+        with patch("market_data.live_service.urlopen") as request:
             instruments = get_instruments(["LCO", "CO", "LGO", "G"])
-            request.assert_called_once()
-            body = json.loads(request.call_args.args[0].data)
-        self.assertEqual(body, {"products": ["BRN", "G"], "strategies": ["OUT"]})
-        self.assertEqual(instruments, {"TT-1": ("CO", "Z26"), "TT-2": ("G", "Z26")})
+            request.assert_not_called()
+        self.assertTrue(instruments)
+        self.assertEqual({product for product, _ in instruments.values()}, {'CO', 'G'})
+        self.assertTrue(all('-' in expression for _, expression in instruments.values()))
 
     def test_gasoil_minutes_match_stored_gasoil_spreads(self):
         frame = spread_closes([(0, "G", "Z26", 700.0, 0), (0, "G", "F27", 698.0, 0)], ["LGOZ6-F7"])

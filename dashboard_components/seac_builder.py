@@ -1,4 +1,4 @@
-"""SEAC expression builder; reuse analysis engines without modifying them."""
+﻿"""SEAC expression builder; reuse analysis engines without modifying them."""
 
 from functools import lru_cache
 from math import isfinite
@@ -19,7 +19,10 @@ from analysis.seasonality import Seasonality
 from market_data import MarketData
 from market_data.config import LIVE_PRODUCTS
 from market_data.queries import database_signature
-from market_data.live_client import fetch_live_quote
+from market_data.workflow_client import fetch_live_quote as shared_live_quote
+
+def fetch_live_quote(product, expression):
+    return shared_live_quote(product, expression, scope="seac-builder")
 
 MONTHS = "FGHJKMNQUVXZ"
 PRODUCTS = (*LIVE_PRODUCTS, "CL-CO")
@@ -110,28 +113,16 @@ def latest_years(count, expression):
     return set(range(end - int(count) + 1, end + 1))
 
 
-class SettlementsOnly:
-    """Restrict the existing engine to settlements; it skips the minute/live overlay."""
-    def __init__(self, reader):
-        self.reader = reader
-
-    def contract_codes(self, *args):
-        return self.reader.contract_codes(*args)
-
-    def get_contract_history(self, *args):
-        return self.reader.get_contract_history(*args)
-
-
 @lru_cache(maxsize=6)
 def history(product, expression, start_year, end_year, window, signature):
     reader = MarketData()
     engine = None
     try:
-        engine = Seasonality(SettlementsOnly(reader))
+        engine = Seasonality(reader, include_live=False)
         return engine.working_day_expression_seasonality(product, expression, start_year, end_year, window)
     finally:
         if engine is not None:
-            engine.live.close()
+            engine.close()
         reader.close()
 
 
@@ -272,11 +263,16 @@ def register_seac_callbacks(app):
     app.clientside_callback(
         """function(point, config) {
             const skip = window.dash_clientside.no_update;
-            if (!point || !config || point.revision !== config.revision) return skip;
+            if (!point || !config || !point.bid || !point.ask || point.revision !== config.revision) return skip;
             const graph = document.querySelector('#seac-chart .js-plotly-plot');
-            if (!graph || !graph.data || !graph.data[point.trace] ||
-                graph.data[point.trace].name !== 'Live price') return skip;
-            return Plotly.restyle(graph, {x: [point.x], y: [point.y]}, [point.trace])
+            const updates = [
+                {trace: point.trace, name: 'Live price', x: point.x, y: point.y},
+                {trace: config.bid_trace, name: 'Best bid', x: point.bid.x, y: point.bid.y},
+                {trace: config.ask_trace, name: 'Best ask', x: point.ask.x, y: point.ask.y}
+            ];
+            if (!graph || !graph.data || updates.some(p => !graph.data[p.trace] ||
+                graph.data[p.trace].name !== p.name)) return skip;
+            return Plotly.restyle(graph, {x: updates.map(p => p.x), y: updates.map(p => p.y)}, updates.map(p => p.trace))
                 .then(function() { return point.revision; });
         }""",
         Output("seac-live-rendered", "data"), Input("seac-live-point", "data"),
@@ -389,18 +385,27 @@ def register_seac_callbacks(app):
             figure.update_xaxes(zeroline=True, zerolinecolor="#737373", showspikes=True)
             figure.update_yaxes(zeroline=True, zerolinecolor="#d4d4d4", gridcolor="#232323")
             config = live_config(base, result, product, expression, window, view, flags)
-            x, y = live_coordinates(config, fetch_live_quote(product, expression) if config else None)
+            quote = fetch_live_quote(product, expression) if config else None
+            x, y = live_coordinates(config, quote)
             figure.add_trace(go.Scatter(x=x, y=y, mode="markers", name="Live price",
                 marker=dict(size=7, color="#22c55e", line=dict(color="white", width=1)),
-                hovertemplate="Live price<br>Value: %{y}<extra></extra>"))
+                hovertemplate="Average (bid + ask) / 2<br>Value: %{y}<extra></extra>"))
             if config:
                 config["trace"] = len(figure.data) - 1
                 config["revision"] = uuid4().hex
+            for side, color, symbol in (("bid", "#60a5fa", "triangle-up"), ("ask", "#fbbf24", "triangle-down")):
+                x, y = live_coordinates(config, {**quote, "value": quote.get(side)} if quote else None)
+                figure.add_trace(go.Scatter(x=x, y=y, mode="markers", name="Best " + side,
+                    marker=dict(size=10, color=color, symbol=symbol),
+                    hovertemplate="Best " + side + "<br>Value: %{y}<extra></extra>"))
+                if config:
+                    config[side + "_trace"] = len(figure.data) - 1
             observations = sum(len(frame) for frame in result["series"].values())
             status = f"{len(result['series'])} years · {observations:,} observations · {window} working days to expiry · Daily settlements · Plot to apply edits"
             notes = [html.P("White = latest displayed year. All years align to expiry. "
-                            "Average uses settlement observations; gaps are not filled. The green dot uses the local live-price server "
-                            "and refreshes every 10 seconds. Quotes older than 2 minutes are hidden. No volume/OI data is included.")]
+                            "Average uses settlement observations; gaps are not filled. Live markers show best bid (blue), "
+                            "best ask (yellow), and their average (green), from the shared manager. Only the live markers "
+                            "refresh every 10 seconds. Quotes older than 2 minutes are hidden. No volume/OI data is included.")]
             notes += [html.Div(warning) for warning in base.get("warnings", [])[:25]]
             return figure, status, notes, config
         except (ValueError, TypeError, KeyError, OSError, RuntimeError, duckdb.Error) as error:
@@ -411,5 +416,11 @@ def register_seac_callbacks(app):
     def refresh_live_dot(_, config):
         if not config:
             raise PreventUpdate
-        x, y = live_coordinates(config, fetch_live_quote(config["product"], config["expression"]))
-        return {"revision": config["revision"], "trace": config["trace"], "x": x, "y": y}
+        quote = fetch_live_quote(config["product"], config["expression"])
+        x, y = live_coordinates(config, quote)
+        point = {"revision": config["revision"], "trace": config["trace"], "x": x, "y": y}
+        for side in ("bid", "ask"):
+            x, y = live_coordinates(config, {**quote, "value": quote.get(side)} if quote else None)
+            point[side] = {"x": x, "y": y}
+        return point
+

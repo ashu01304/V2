@@ -4,6 +4,7 @@ import argparse
 from datetime import date
 from functools import lru_cache
 from math import isfinite
+from html import escape
 
 import duckdb
 import numpy as np
@@ -15,7 +16,8 @@ from requests import RequestException
 
 from analysis.contract_universe import load_expiries
 from analysis.expression import format_contract_label
-from market_data import LiveMarketDataClient, MarketData
+from market_data.data_client import DataClient
+from market_data.workflow_client import WorkflowLiveClient,full_structure
 from market_data.queries import database_signature
 from market_data.config import LIVE_PRODUCTS
 
@@ -25,7 +27,7 @@ PRICE_DECIMALS = {"HO": 4, "NG": 3, "RB": 4}
 TIMEFRAMES = {15: "15 min", 30: "30 min", 60: "1 hour", 120: "2 hours"}
 FIT_OPTIONS = {"linear": "Linear", "quadratic": "Quadratic", "cubic": "Cubic", "spline": "Smooth spline"}
 PRODUCTS = ("CL-CO", *LIVE_PRODUCTS)
-STRUCTURES = {"outright": "Outright / single month", "spread": "Calendar spread", "fly": "Butterfly (1:-2:1)"}
+STRUCTURES = {"spread": "Calendar spread", "fly": "Butterfly (1:-2:1)", "defly": "Double butterfly (1:-3:3:-1)"}
 
 
 def consecutive_contracts(months, today=None, skip_months=0, *, product="CL-CO"):
@@ -43,42 +45,21 @@ def consecutive_contracts(months, today=None, skip_months=0, *, product="CL-CO")
             for month in pd.date_range(start, periods=months + 1, freq="MS")]
 
 
-def live_prices(now=None, *, product="CL-CO"):
-    """Use the live server's reference value (admin, then last, then midpoint)."""
-    def number(value):
-        try:
-            value = float(value)
-            return value if isfinite(value) and value != -100 else None
-        except (TypeError, ValueError):
-            return None
-
-    now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
-    client = LiveMarketDataClient(timeout=2)
+def live_prices(now=None, *, product="CL-CO", expressions=None, with_sides=False):
+    """Ask the shared resolver for complete structures in one compact batch."""
+    client = WorkflowLiveClient('live-curves')
     try:
-        health = client.health()
-        if not health.get("status", "").startswith("CONNECTED:"):
-            return {}, "Live feed disconnected"
-        rows = client.snapshot(["CL", "CO"] if product == "CL-CO" else [product])
-        legs = {}
-        for row in rows:
-            try:
-                received = pd.to_datetime(row["received_at"], utc=True)
-                age = (now - received).total_seconds()
-                if pd.isna(received) or not 0 <= age <= 120:
-                    continue
-                key = (row["product"], row["contract"])
-                value = number(row.get("value"))
-                if value is not None:
-                    legs[key] = value
-            except (KeyError, ValueError, TypeError):
-                continue
-        if product != "CL-CO":
-            prices = {code: value for (symbol, code), value in legs.items() if symbol == product}
-            return prices, "Live feed connected" if prices else "Waiting for matching live prices"
-        prices = {code: value - legs[("CO", code)]
-                  for (product, code), value in legs.items()
-                  if product == "CL" and ("CO", code) in legs}
-        return prices, "Live feed connected" if prices else "Waiting for matching live prices"
+        client.replace([full_structure(product,expression) for expression in expressions or []])
+        quotes = (client.quotes(product, expressions or [], best_sides=True, include_recipes=True) if with_sides
+                  else client.quotes(product, expressions or []))
+        prices = {expression: quote.get("value") for expression, quote in quotes.items()}
+        count = sum(any(q.get(side) is not None for side in ('bid','ask')) for q in quotes.values()) if with_sides else sum(value is not None for value in prices.values())
+        status = f"Quoted structures: {count}/{len(prices)} available"
+        if with_sides:
+            pending = sum(q.get(side) is not None and not q.get(side+'_optimal',False) for q in quotes.values() for side in ('bid','ask'))
+            if pending:
+                status += f" | {pending} sides show best found; optimality not confirmed"
+        return (quotes if with_sides else prices), status
     except (RequestException, ValueError, TypeError, KeyError):
         return {}, "Live service unavailable"
     finally:
@@ -87,7 +68,7 @@ def live_prices(now=None, *, product="CL-CO"):
 
 def structure_legs(contracts, structure="spread", gap=1):
     """Roll each structure forward one month; gap is the spacing between its legs."""
-    weights = {"outright": (1,), "spread": (1, -1), "fly": (1, -2, 1)}[structure]
+    weights = {"outright": (1,), "spread": (1, -1), "fly": (1, -2, 1), "defly": (1, -3, 3, -1)}[structure]
     span = (len(weights) - 1) * gap
     return [[(contracts[start + index * gap], weight) for index, weight in enumerate(weights)]
             for start in range(max(0, len(contracts) - span))]
@@ -102,9 +83,10 @@ def structure_expressions(contracts, structure="spread", gap=1):
 
 def spread_values(prices, contracts, structure="spread", gap=1, *, product="CL-CO"):
     values = []
-    for legs in structure_legs(contracts, structure, gap):
+    for expression, legs in zip(structure_expressions(contracts, structure, gap), structure_legs(contracts, structure, gap)):
         try:
-            value = sum(weight * float(prices[code]) for code, weight in legs)
+            quote = prices[expression]
+            value = float(quote.get("value") if isinstance(quote, dict) else quote)
             values.append(round(value, PRICE_DECIMALS.get(product, 2)) if isfinite(value) else None)
         except (KeyError, ValueError, TypeError):
             values.append(None)
@@ -118,11 +100,11 @@ def _historical_changes(contracts, minute, signature, product="CL-CO", structure
         # The minute master stores spreads, not outright minute price histories.
         return {age: [None] * len(expressions) for age in TIMEFRAMES}
     targets = [pd.Timestamp(minute) - pd.Timedelta(minutes=age) for age in TIMEFRAMES]
-    db = MarketData()
+    client = DataClient()
     try:
-        snapshots = db.expression_snapshots([(expression, product, expression) for expression in expressions], targets)
+        snapshots = client.minute_snapshots([(expression,full_structure(product,expression)) for expression in expressions],targets)
     finally:
-        db.close()
+        client.close()
     return {age: [snapshots.get(target, {}).get(expression) for expression in expressions]
             for age, target in zip(TIMEFRAMES, targets)}
 
@@ -174,16 +156,42 @@ def trend_boxes(rows):
     return boxes
 
 
+def recipe_hover(quote,side,decimals):
+    parts=quote.get(side+'_recipe',[]) if isinstance(quote,dict) else []
+    if not parts:
+        return 'Manager did not publish component details.<br>Restart the live manager and this dashboard.'
+    lines=[]
+    for part in parts:
+        weight=part['weight']
+        price=part.get('price')
+        used_side=part.get('book_side','')
+        action='Sell' if used_side=='bid' else 'Buy'
+        label=escape(str(part.get('structure') or part['tt_id']))
+        value=f" @ {float(price):.{decimals}f}" if price is not None else ''
+        lines.append(f"{weight:+g} × {label}<br>  {action} {abs(weight):g} at {used_side}{value}")
+    return '<b>Components used</b><br>'+'<br>'.join(lines)
+
+
 def make_figure(contracts, live, curves=None, *, product="CL-CO", structure="spread", gap=1):
     labels = [format_contract_label(expression) for expression in structure_expressions(contracts, structure, gap)]
     decimals = PRICE_DECIMALS.get(product, 2)
-    values = spread_values(live, contracts, structure, gap, product=product)
-    figure = go.Figure(go.Scatter(
-        x=list(range(len(labels))), y=values, customdata=labels,
-        name="Live", uid="live", mode="lines+markers", connectgaps=False,
-        line={"color": LIVE_COLOR, "width": 3}, marker={"size": 7},
-        hovertemplate="%{customdata}<br>%{y:." + str(decimals) + "f}<extra>Live</extra>",
-    ))
+    expressions = structure_expressions(contracts, structure, gap)
+    sides = {}
+    for side in ("bid", "ask"):
+        sides[side] = []
+        for expression in expressions:
+            quote = live.get(expression, {})
+            value = quote.get(side) if isinstance(quote, dict) else None
+            sides[side].append(round(float(value), decimals) if value is not None and isfinite(float(value)) else None)
+    values = [(bid+ask)/2 if bid is not None and ask is not None else None
+              for bid, ask in zip(sides['bid'], sides['ask'])]
+    figure = go.Figure()
+    for side, color in (("bid", "#60a5fa"), ("ask", "#fbbf24")):
+        hover=[[label,recipe_hover(live.get(expression,{}),side,decimals)] for label,expression in zip(labels,expressions)]
+        figure.add_trace(go.Scatter(x=list(range(len(labels))), y=sides[side], customdata=hover,
+            name="Best " + side, uid=side, mode="lines+markers", connectgaps=False,
+            line={"color":color,"width":2}, marker={"size":5},
+            hovertemplate="%{customdata[0]}<br>%{y:."+str(decimals)+"f}<br>%{customdata[1]}<extra>Best "+side+"</extra>"))
     available = [(index, value) for index, value in enumerate(values) if value is not None]
     for curve in dict.fromkeys(curves or []):
         if curve not in FIT_OPTIONS:
@@ -207,15 +215,15 @@ def make_figure(contracts, live, curves=None, *, product="CL-CO", structure="spr
     figure.update_layout(
         template="plotly_dark", paper_bgcolor="#111827", plot_bgcolor="#111827",
         margin={"l": 65, "r": 25, "t": 35, "b": 90}, dragmode="zoom",
-        uirevision=":".join([product, structure, str(gap), *contracts]), showlegend=bool(curves), hovermode="closest",
+        uirevision=":".join([product, structure, str(gap), *contracts]), showlegend=True, hovermode="closest",
         legend={"orientation": "h", "y": 1.08},
         xaxis={"title": "Consecutive contract months", "type": "linear",
                "tickmode": "array", "tickvals": list(range(len(labels))), "ticktext": labels, "tickangle": -45},
         yaxis={"title": f"{product} {STRUCTURES[structure]} price",
                "tickformat": f".{decimals}f", "zerolinecolor": "#64748b"},
     )
-    if not any(value is not None for value in values):
-        figure.add_annotation(text="No matching live prices available", x=.5, y=.5,
+    if not any(value is not None for values in sides.values() for value in values):
+        figure.add_annotation(text="No matching bid/ask quotes available", x=.5, y=.5,
                               xref="paper", yref="paper", showarrow=False)
     return figure
 
@@ -244,9 +252,8 @@ app.layout = html.Div([
             style={"width": "300px", "color": "#111827"})]),
         html.Button("Refresh", id="idea-refresh", n_clicks=0),
     ], style={"display": "flex", "gap": "24px", "alignItems": "center", "flexWrap": "wrap"}),
-    html.P("One live reference-price line. Outrights use the server's reference value; spreads and flies "
-           "are calculated from those values (1:-1 and 1:-2:1). CL-CO is calculated from CL minus CO. "
-           "Missing or stale prices leave gaps.",
+    html.P("Best bid (blue) and ask (yellow), comparing direct quotes and mixes of up to three quoted structures. "
+           "Sides are optimized independently within a bounded search; composite quotes are indicative. Missing sides leave gaps.",
            style={"fontSize": "12px", "color": "#94a3b8"}),
     dcc.Graph(id="idea-chart", config={"scrollZoom": False, "displaylogo": False}, style={"height": "85vh"}),
     html.Div(id="idea-feed-status", style={"fontSize": "12px", "color": "#94a3b8"}),
@@ -286,7 +293,7 @@ def update_chart(months, skip_months, _refresh, _tick, curves, product="CL-CO", 
     gap = max(1, min(24, int(gap or 1)))
     if structure == "outright":
         gap = 1
-    span = gap * {"outright": 0, "spread": 1, "fly": 2}[structure]
+    span = gap * {"outright": 0, "spread": 1, "fly": 2, "defly": 3}[structure]
     set_props("idea-gap", {"disabled": structure == "outright"})
     try:
         all_contracts = consecutive_contracts(months + skip_months + span - 1, product=product)
@@ -296,7 +303,8 @@ def update_chart(months, skip_months, _refresh, _tick, curves, product="CL-CO", 
         set_props("idea-trend-boxes", {"children": trend_boxes([])})
         return make_figure([], {}, curves, product=product, structure=structure, gap=gap)
     contracts = all_contracts[skip_months:]
-    live, status = live_prices(product=product)
+    requested = structure_expressions(all_contracts, structure, gap)
+    live, status = live_prices(product=product, expressions=requested, with_sides=True)
     rows = change_rows(all_contracts[:months + span], live, product, structure, gap)
     title = f"{product} | {STRUCTURES[structure]}"
     if structure != "outright":

@@ -1,89 +1,72 @@
-import re
-
+"""Forward curves: each shifted complete structure uses the common data client."""
+import pandas as pd
+import threading
+import time
 from analysis.expression import parse_expression
-from market_data import LiveMarketDataClient, MarketData
+from market_data.queries import MarketData,database_signature
+from market_data.data_client import DataClient
+from market_data.structure_parser import MONTHS,month_code
+from market_data.workflow_client import WorkflowLiveClient,full_structure
 
-
-MONTH_ORDER = {month: index for index, month in enumerate("FGHJKMNQUVXZ", 1)}
+_settlement_cache={}
+_cache_lock=threading.Lock()
 
 
 class ForwardCurve:
-    def __init__(self, live=None, db=None):
-        self.live = live or LiveMarketDataClient()
-        self.db = db or MarketData()
+    def __init__(self,live=None,db=None):
+        self.signature=database_signature()
+        self.live=live or WorkflowLiveClient('curve')
+        self.db=db or MarketData()
+        self.owned=db is None
+        self.data=DataClient(database=self.db)
 
     @staticmethod
     def _format(legs):
-        parts = []
-        for index, (coefficient, contract) in enumerate(legs):
-            sign = "-" if coefficient < 0 else "+" if index else ""
-            size = abs(coefficient)
-            parts.append(f"{sign}{'' if size == 1 else f'{size:g}*'}{contract}")
-        return "".join(parts)
+        return ''.join(('-' if weight<0 else '+' if i else '')+
+            (f'{abs(weight):g}*' if abs(weight)!=1 else '')+code for i,(weight,code) in enumerate(legs))
 
-    @staticmethod
-    def _prices(rows, contract_key="contract"):
-        prices = {}
-        for row in rows:
-            contract, price = row.get(contract_key, ""), row.get("price")
-            match = re.fullmatch(r"([FGHJKMNQUVXZ])(\d{2})", contract)
-            if match and price is not None:
-                month, year = match.groups()
-                ordinal = (2000 + int(year)) * 12 + MONTH_ORDER[month] - 1
-                prices[ordinal] = (contract, float(price))
-        return prices
-
-    def calculate(self, symbol, expression):
-        legs = parse_expression(expression)
+    def calculate(self,symbol,expression):
+        legs=parse_expression(expression)
         if not legs:
-            return {"live": [], "settlements": []}
-        first_month, first_year = legs[0][1][0], int(legs[0][1][1:]) + 2000
-        first_ordinal = first_year * 12 + MONTH_ORDER[first_month] - 1
-        offsets = []
-        for coefficient, contract in legs:
-            ordinal = (2000 + int(contract[1:])) * 12 + MONTH_ORDER[contract[0]] - 1
-            offsets.append((coefficient, ordinal - first_ordinal))
-
-        def build(prices, anchors=None):
-            points = []
-            for anchor in sorted(prices if anchors is None else anchors):
-                shifted = [(coefficient, prices[anchor + offset][0])
-                           for coefficient, offset in offsets if anchor + offset in prices]
-                if len(shifted) != len(offsets):
-                    continue
-                value = sum(coefficient * prices[anchor + offset][1]
-                            for coefficient, offset in offsets)
-                points.append({"contract": self._format(shifted),
-                               "label": shifted[0][1],
-                               "price": round(value, 2)
-                               if symbol in {"CL", "CO", "CL-CO"} else value,
-                               "order": anchor})
-            return points
-
-        if symbol == "CL-CO":
-            snapshot = self.live.snapshot(["CL", "CO"], raw=True)
-            live_prices = {(row.get("product"), row.get("contract")): row.get("price")
-                           for row in snapshot if row.get("price") is not None}
-            live_rows = [
-                {"contract": contract,
-                 "price": float(price) - float(live_prices[("CO", contract)])}
-                for (product, contract), price in live_prices.items()
-                if product == "CL" and ("CO", contract) in live_prices
-            ]
-        else:
-            live_rows = self.live.snapshot([symbol], raw=True)
-        live = build(self._prices(live_rows))
-        anchors = {point["order"] for point in live}
-        dates = self.db.settlement_dates(symbol, limit=2)
-        settlements = []
-        for date in dates:
-            frame = self.db.settlements_on(symbol, date)
-            rows = [{"contract_code": row.contract_code, "price": row.price}
-                    for row in frame.itertuples(index=False)]
-            settlements.append({"date": str(date),
-                                "points": build(self._prices(rows, "contract_code"), anchors)})
-        return {"live": live, "settlements": settlements}
+            return dict(live=[],settlements=[])
+        ordinal=lambda code:(2000+int(code[1:]))*12+MONTHS.index(code[0])
+        first=min(ordinal(code) for _,code in legs)
+        offsets=[(weight,ordinal(code)-first) for weight,code in legs]
+        months=self.live.client.live_resolver._call('GET','/universe',params={'product':symbol})['months']
+        available={ordinal(code) for code in months}
+        today=pd.Timestamp.now(tz='UTC')
+        first_active=today.year*12+today.month-1
+        shifted=[]
+        for anchor in sorted(available):
+            if anchor<first_active or not all(anchor+offset in available for _,offset in offsets):
+                continue
+            raw=self._format([(weight,month_code(anchor+offset)) for weight,offset in offsets])
+            shifted.append((anchor,raw,full_structure(symbol,raw)))
+        self.live.replace([text for _,_,text in shifted])
+        quotes=self.live.quotes(symbol,[raw for _,raw,_ in shifted])
+        points=[dict(contract=raw,label=month_code(anchor),order=anchor,price=quotes.get(raw,{}).get('value'),
+                     bid=quotes.get(raw,{}).get('bid'),ask=quotes.get(raw,{}).get('ask')) for anchor,raw,_ in shifted]
+        signature=tuple(self.signature) if self.signature is not None else None
+        cache_key=(symbol,tuple(shifted),signature)
+        with _cache_lock:
+            cached=_settlement_cache.get(cache_key)
+        if cached and time.monotonic()-cached[0]<60:
+            return dict(live=points,settlements=cached[1])
+        settlements=[]
+        for day in self.db.settlement_dates(symbol,limit=2):
+            history=[]
+            for anchor,raw,text in shifted:
+                frame=self.data.seac(text,start=day,end=day)['data']
+                if not frame.empty:
+                    history.append(dict(contract=raw,label=month_code(anchor),order=anchor,price=float(frame['price'].iloc[-1])))
+            settlements.append(dict(date=str(day),points=history))
+        with _cache_lock:
+            _settlement_cache[cache_key]=(time.monotonic(),settlements)
+            while len(_settlement_cache)>16:
+                _settlement_cache.pop(next(iter(_settlement_cache)))
+        return dict(live=points,settlements=settlements)
 
     def close(self):
-        self.live.close()
-        self.db.close()
+        self.data.close()
+        if self.owned:
+            self.db.close()

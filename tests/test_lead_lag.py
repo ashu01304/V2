@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from analysis.lead_lag import neighbour_indices, neighbour_movements, neighbour_summary, fit_neighbour_forecasts, neighbour_figure
-from market_data.intraday import load_snapshot_history
+from market_data.workflow_client import load_snapshot_history
 from tests.helpers import memory_reader
 
 
