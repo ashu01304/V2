@@ -24,6 +24,7 @@ def main():
     parser.add_argument('--live-url',default=LIVE_MANAGER_URL)
     parser.add_argument('--wait',type=int,default=30,help='Maximum live waiting time in seconds (0–120)')
     parser.add_argument('--skip-live',action='store_true')
+    parser.add_argument('--daily',action='store_true',help='Inspect recent daily candle extrema and their stored spread components')
     args=parser.parse_args()
     if not 0<=args.wait<=120:
         parser.error('--wait must be between 0 and 120')
@@ -134,6 +135,29 @@ def main():
                     for row in samples.itertuples(index=False):
                         equal(row.price,sum(weight*parts[instrument].loc[row.timestamp] for instrument,weight in raw['recipe'].items()))
                 report('PASS',f'Minute: {len(frame)} observations; last {len(samples)} independently checked against stored spreads')
+                if args.daily:
+                    points=frame.set_index('timestamp')['price']
+                    daily=points.resample('1D').ohlc().dropna()
+                    daily['minute_points']=points.resample('1D').count().reindex(daily.index)
+                    print('\nDAILY UTC CANDLES (last 10 observed days):\n'+daily.tail(10).to_string(),flush=True)
+                    extremes=[]
+                    for day in daily.tail(5).index:
+                        values=points.loc[(points.index>=day)&(points.index<day+pd.Timedelta(days=1))]
+                        for side,stamp in [('low',values.idxmin()),('high',values.idxmax())]:
+                            extremes.append(dict(day=str(day.date()),side=side,timestamp=stamp,structure_price=points.loc[stamp]))
+                    with closing(MarketData(args.database)) as db:
+                        for instrument,weight in raw['recipe'].items():
+                            series=db.spread(instrument,start=min(row['timestamp'] for row in extremes).to_pydatetime(),
+                                             end=max(row['timestamp'] for row in extremes).to_pydatetime())
+                            lookup=series.set_index(pd.to_datetime(series['timestamp'],utc=True))['price']
+                            for row in extremes:
+                                price=float(lookup.loc[row['timestamp']])
+                                row[f'{weight:g} * {instrument}']=price*weight
+                    print('\nPRICES BEHIND EACH DAILY EXTREME (columns are weighted contributions):\n'+
+                          pd.DataFrame(extremes).to_string(index=False),flush=True)
+                    for row in extremes:
+                        equal(row['structure_price'],sum(value for key,value in row.items() if ' * ' in key))
+                    print('Extrema match stored components. This checks reconstruction, not whether source quotes are valid.',flush=True)
                 candles=client.minute(structure,start=start,end=end,interval='15min')['data']
                 if candles.empty:
                     raise AssertionError('Raw minute data exists but candles are empty')

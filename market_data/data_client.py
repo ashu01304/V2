@@ -35,10 +35,13 @@ class DataClient:
         with self._database() as database:
             return seac_resolver.resolve(structure,database,start=start,end=end)
 
-    def minute(self,structure,*,start,end,interval='15min'):
+    def minute(self,structure,*,start,end,interval='15min',fetched_only=False,fill_live_gaps=False,
+               normalize_spikes=True):
         self.plan(structure,'minute')
         with self._database() as database:
-            return minute_resolver.resolve(structure,database,start=start,end=end,interval=interval)
+            return minute_resolver.resolve(structure,database,start=start,end=end,interval=interval,
+                                           fetched_only=fetched_only,fill_live_gaps=fill_live_gaps,
+                                           normalize_spikes=normalize_spikes)
 
     def live(self,structure,*,include_alternatives=False):
         return self.live_resolver.resolve(structure,include_alternatives=include_alternatives)

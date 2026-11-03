@@ -70,6 +70,10 @@ def _update_locked(database_path, include_settlements):
                             logger.info("Spread rows processed: %s", f"{spread_count:,}")
                         del value
 
+            filled_count = database.fill_live_spread_gaps()
+            logger.info("Replaced %s provisional minute prices with next fetched price; "
+                        "points without a next fetched price are kept", f"{filled_count:,}")
+
             if include_settlements:
                 logger.info("Importing SEAC settlements...")
                 batch = []

@@ -1,9 +1,11 @@
 """Complete structure -> aligned stored minute prices -> optional OHLC candles."""
-from collections import defaultdict,deque
+from collections import defaultdict
+from heapq import heappop, heappush
 import re
 import pandas as pd
 from .contracts import price_recipe
 from .structure_parser import parse_structure,MONTHS
+from .minute_quality import normalize_minutes
 
 
 def plan(structure):
@@ -32,7 +34,7 @@ def interval_minutes(interval):
     return minutes
 
 
-def stored_recipe(request,database,start,end):
+def stored_recipe(request,database,start,end,*,fetched_only=False,fill_live_gaps=False):
     """Use actual stored calendar edges; do not guess symbol formats or fill prices."""
     products=defaultdict(dict)
     for (product,month),weight in request.settlement_legs().items():
@@ -55,7 +57,10 @@ def stored_recipe(request,database,start,end):
         if a is not None and b is not None and a!=b:
             edges.append((product,a,b,instrument))
     candidates=[edge[3] for edge in edges]
-    coverage=database.spread_coverage(candidates,start.to_pydatetime(),end.to_pydatetime())
+    source_options={'fetched_only':True} if fetched_only else {}
+    if fill_live_gaps:
+        source_options['fill_live_gaps']=True
+    coverage=database.spread_coverage(candidates,start.to_pydatetime(),end.to_pydatetime(),**source_options)
     counts={row.instrument:row.rows for row in coverage.itertuples(index=False)}
     recipe=defaultdict(float)
     missing=[]
@@ -71,13 +76,21 @@ def stored_recipe(request,database,start,end):
             graph[b].append((a,instrument,-1))
         anchor=min(wanted)
         parents={anchor:None}
-        queue=deque([anchor])
+        # Maximise the weakest edge's stored coverage before minimising leg count.
+        # A newly recorded direct spread must not displace a well-covered calendar chain.
+        best={anchor:(float('inf'),0)}
+        queue=[(-float('inf'),0,anchor)]
         while queue:
-            current=queue.popleft()
+            negative_coverage,hops,current=heappop(queue)
+            available=-negative_coverage
+            if best[current] != (available,-hops):
+                continue
             for neighbor,instrument,direction in graph[current]:
-                if neighbor not in parents:
+                candidate=(min(available,counts[instrument]),-hops-1)
+                if candidate > best.get(neighbor,(-1,-float('inf'))):
+                    best[neighbor]=candidate
                     parents[neighbor]=(current,instrument,direction)
-                    queue.append(neighbor)
+                    heappush(queue,(-candidate[0],hops+1,neighbor))
         for month,weight in wanted.items():
             if month not in parents:
                 missing.append(product+' '+MONTHS[month%12]+f'{month//12%100:02d}')
@@ -93,7 +106,8 @@ def stored_recipe(request,database,start,end):
     return {instrument:weight for instrument,weight in recipe.items() if abs(weight)>1e-9},diagnostics
 
 
-def resolve(structure, database, *, start, end, interval='15min'):
+def resolve(structure, database, *, start, end, interval='15min', fetched_only=False, fill_live_gaps=False,
+            normalize_spikes=True):
     request=parse_structure(structure)
     start,end=pd.Timestamp(start),pd.Timestamp(end)
     if pd.isna(start) or pd.isna(end):
@@ -103,15 +117,28 @@ def resolve(structure, database, *, start, end, interval='15min'):
     if start>=end:
         raise ValueError('Minute start must be before end; end is exclusive')
     minutes=None if interval is None else interval_minutes(interval)
-    recipe,diagnostics=stored_recipe(request,database,start,end)
-    frame=(database.structure_minutes(recipe,start.to_pydatetime(),end.to_pydatetime()) if recipe else
+    recipe,diagnostics=stored_recipe(request,database,start,end,fetched_only=fetched_only,fill_live_gaps=fill_live_gaps)
+    source_options={'fetched_only':True} if fetched_only else {}
+    if fill_live_gaps:
+        source_options['fill_live_gaps']=True
+    frame=(database.structure_minutes(recipe,start.to_pydatetime(),end.to_pydatetime(),**source_options) if recipe else
            pd.DataFrame({'timestamp':pd.Series(dtype='datetime64[ns, UTC]'),'price':pd.Series(dtype=float)}))
     frame['timestamp']=pd.to_datetime(frame['timestamp'],utc=True)
+    # Filter the complete structure before OHLC aggregation, so artificial wicks
+    # caused by combinations of otherwise smooth legs can also be detected.
+    diagnostics['normalized_spikes']=0
+    if normalize_spikes:
+        tick=min({'HO':.0001,'RB':.0001,'NG':.001,'G':.25}.get(product,.01)
+                 for product,_ in request.settlement_legs())
+        frame,diagnostics['normalized_spikes']=normalize_minutes(frame,tick)
+    diagnostics['dropped_spikes']=diagnostics['normalized_spikes']
     if minutes is not None:
         frame=(frame.set_index('timestamp')['price'].resample(f'{minutes}min',origin='epoch')
                .ohlc().dropna().reset_index())
     message=('No stored spread path with observations in this window for: '+', '.join(diagnostics['missing'])
              if diagnostics['missing'] else 'Required stored spreads have no exact common timestamps' if frame.empty else '')
+    if frame.empty and fetched_only and not fill_live_gaps:
+        message='No fetched-only minute data with all required legs available. '+message
     return dict(structure=request.text,source='minute',status='available' if not frame.empty else 'no_data',
                 data=frame,recipe=recipe,diagnostics=diagnostics,message=message)
 

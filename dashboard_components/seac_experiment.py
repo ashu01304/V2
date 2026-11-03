@@ -17,7 +17,9 @@ from analysis.expression import format_contract_label, parse_expression
 from analysis.expiry import OfficialExpiryLookup
 from analysis.plotting import SeasonalityPlotter
 from analysis.seasonality import Seasonality
+from analysis.minute_candles import percentile_candles
 from market_data import MarketData
+from market_data.data_client import DataClient
 from market_data.config import LIVE_PRODUCTS
 from market_data.queries import database_signature
 from market_data.workflow_client import WorkflowLiveClient, full_structure
@@ -199,10 +201,12 @@ def empty_figure(message="Set contract weights and press Plot"):
     return figure
 
 
-def rolling_statistics(source, index, days):
+def rolling_statistics(source, index, days, *, include_current=True):
     means, deviations = [], []
     for day in index:
-        values = source.loc[(source.index > day - days) & (source.index <= day)].to_numpy().ravel()
+        window = ((source.index > day - days) & (source.index <= day) if include_current else
+                  (source.index >= day - days) & (source.index < day))
+        values = source.loc[window].to_numpy().ravel()
         values = pd.Series(values).dropna()
         means.append(values.mean())
         deviations.append(values.std(ddof=1))
@@ -240,7 +244,7 @@ def add_statistics(figure, combined, visible, multiplier, days, source,
     figure.data[traces[2]].name = f"Other years mean ± {multiplier:g} SD"
     current_x = list(current_index) if current_index is not None else []
     current_source = source[[current_year]] if current_year in source.columns else source.iloc[:, :0]
-    current_mean, current_sd = rolling_statistics(current_source, current_x, days)
+    current_mean, current_sd = rolling_statistics(current_source, current_x, days, include_current=False)
     current_traces = []
     for index, values in enumerate((current_mean + current_multiplier * current_sd,
                                     current_mean - current_multiplier * current_sd)):
@@ -368,6 +372,46 @@ def live_status(config, quote):
             (' · alternatives not supplied: restart the live manager' if quote.get('alternatives') is None else ''))
 
 
+@lru_cache(maxsize=16)
+def daily_minute_bars(product, expression, reference_day, expiry, signature):
+    """Daily UTC bars from aligned minute observations; never substitute settlements."""
+    start = pd.Timestamp(reference_day, tz="UTC") - pd.Timedelta(days=90)
+    end = min(pd.Timestamp(reference_day, tz="UTC") + pd.Timedelta(days=91),
+              pd.Timestamp(expiry).tz_localize("UTC").normalize() + pd.Timedelta(days=1))
+    if end <= start:
+        return pd.DataFrame(), "Contract expired before the displayed window."
+    with DataClient() as client:
+        response = client.minute(full_structure(product, expression), start=start, end=end, interval=None,
+                                 fetched_only=True, fill_live_gaps=True)
+    minutes = response["data"].set_index("timestamp")["price"]
+    bars, retained_count = percentile_candles(minutes, "1d")
+    message = response.get("message", "")
+    if not bars.empty:
+        first, last = pd.to_datetime(bars.timestamp, utc=True).agg(["min", "max"])
+        message = (f"Minute coverage: {len(bars)} daily candles, {first:%Y-%m-%d} to {last:%Y-%m-%d}. "
+                   "Stored spreads: " + ", ".join(response["recipe"]))
+        message += f". Isolated minute spikes dropped: {response['diagnostics'].get('dropped_spikes', 0)}"
+        message += f". P10–P90 per day: {retained_count:,} points used, {len(minutes) - retained_count:,} excluded"
+        if len(bars) == 1:
+            message += " Only one day has aligned minute data; a longer candle history cannot be drawn from it."
+    elif not minutes.empty:
+        message = "No daily candles remain after P10–P90 filtering."
+    return bars, message
+
+
+def add_seac_overlay(figure, frame, year):
+    """Use the prepared settlement series, before any live-point insertion."""
+    if frame is None or frame.empty:
+        return False
+    figure.add_trace(go.Scatter(
+        x=frame.index, y=frame['value'], mode='lines', name=f'{year} SEAC',
+        visible='legendonly', showlegend=True,
+        line=dict(color='white', width=2), connectgaps=False,
+        customdata=pd.to_datetime(frame['date']).dt.strftime('%Y-%m-%d'),
+        hovertemplate='SEAC settlement<br>Date: %{customdata}<br>Value: %{y}<extra></extra>'))
+    return True
+
+
 def live_config(base, result, product, expression, window, view, flags):
     anchor = parse_expression(expression)[0][1]
     year = 2000 + int(anchor[1:])
@@ -398,7 +442,7 @@ def builder_layout():
                     value=[], id="seac-exclude", className="seac-exclude-options")], className="seac-exclude-menu"),
             dcc.Checklist([{"label": "Other mean", "value": "mean"}, {"label": "Other SD", "value": "sd"},
                 {"label": "Latest SD", "value": "current"}],
-                ["mean", "sd", "current"], id="seac-stat-visible", inline=True),
+                ["mean"], id="seac-stat-visible", inline=True),
             html.Label([html.Span("Roll days"), dcc.Input(id="seac-rolling-days", type="number", min=1, max=365,
                 step=1, value=20, debounce=True, style={"width": "50px"})]),
             html.Label([html.Span("Other SD ×"), dcc.Input(id="seac-sd-multiplier", type="number", min=0, step=.25,
@@ -442,20 +486,15 @@ def builder_layout():
         html.Div([html.Div([html.Div(label,style={'color':'#aaa','fontSize':'12px'}),
                     html.Strong('N/A',id='seac-score-'+key,style={'fontSize':'20px'})],
                     style={'border':'1px solid #333','padding':'9px 12px','minWidth':'185px'})
-                  for key,label in [('history-zone','Historical containment'),('latest-zone','Latest-year containment'),
-                                    ('history-stability','Historical stability'),('latest-stability','Latest-year conformity')]],
+                  for key,label in [('history-zone','Historical containment'),('latest-zone','Latest-year containment')]],
                  style={'display':'flex','flexWrap':'wrap','gap':'8px','margin':'8px 0'}),
         html.Details([html.Summary('Score definitions and sample coverage'),
             html.Div(id='seac-score-details',children='Plot a structure to calculate scores.'),
             html.P('Containment uses rolling historical 5th–95th percentile bands at each expiry position, controlled by Roll days. '
                    'Reference observations are pooled from (position − N days, position], with earlier history warming up the visible window. '
                    'Historical coverage holds out each older year in turn; the latest year never enters the reference. '
-                   'Historical stability = 100 / (1 + span of rolling means / historical SD + span of rolling SDs / historical SD). '
-                   'Latest-year conformity averages 100 / (1 + absolute rolling-mean displacement in historical SD units '
-                   '+ absolute log of the latest/historical rolling-SD ratio) over matching dates. '
-                   'These stability formulas are diagnostic scoring choices, not probabilities. '
                    'Scores require at least 3 older years and 20 historical observations; held-out and latest-year coverage '
-                   'require 5 observations, historical containment requires 3 valid folds, and rolling scores require 5 comparable dates. '
+                   'require 5 observations, and historical containment requires 3 valid folds. '
                    'Each percentile window requires 20 observations from at least 2 reference years; positions without sufficient data are not scored. '
                    'A wide zone can yield high containment, so check its width. Purple shows the rolling zone used for latest-year containment. '
                    'Enable Held-out historical zones in the legend to see the reference zones used for historical containment; '
@@ -474,19 +513,20 @@ def register_seac_callbacks(app):
     app.clientside_callback(
         """function(visible, multiplier, days, currentMultiplier, stats) {
             const skip = window.dash_clientside.no_update;
-            if (!stats) return [skip,'N/A','N/A','N/A','N/A','Plot a structure to calculate scores.'];
+            if (!stats) return [skip,'N/A','N/A','Plot a structure to calculate scores.'];
             if (multiplier === null || !Number.isFinite(multiplier) || multiplier < 0 ||
                 !Number.isInteger(days) || days < 1 || days > 365 || currentMultiplier === null ||
-                !Number.isFinite(currentMultiplier) || currentMultiplier < 0) return Array(6).fill(skip);
+                !Number.isFinite(currentMultiplier) || currentMultiplier < 0) return Array(4).fill(skip);
             const graph = document.querySelector('#seac-chart .js-plotly-plot');
-            if (!graph || !graph.layout || !graph.layout.meta || graph.layout.meta.stats !== stats.revision) return Array(6).fill(skip);
+            if (!graph || !graph.layout || !graph.layout.meta || graph.layout.meta.stats !== stats.revision) return Array(4).fill(skip);
             visible = visible || [];
-            function calculate(xs, values) {
+            function calculate(xs, values, excludeCurrent=false) {
               const mean=[], sd=[];
               for (const x of xs) {
                 let count=0, average=0, m2=0;
                 for (let i=0; i<stats.sourceX.length; i++) {
-                    if (stats.sourceX[i] <= x-days || stats.sourceX[i] > x) continue;
+                    const day = stats.sourceX[i];
+                    if (excludeCurrent ? (day < x-days || day >= x) : (day <= x-days || day > x)) continue;
                     for (const value of values[i]) {
                         if (value === null || !Number.isFinite(value)) continue;
                         count++;
@@ -502,7 +542,7 @@ def register_seac_callbacks(app):
             }
             const otherValues = stats.sourceValues.map(row => row.filter((_,i) => i !== stats.currentColumn));
             const {mean, sd} = calculate(stats.x, otherValues);
-            const current = calculate(stats.currentX, stats.currentValues);
+            const current = calculate(stats.currentX, stats.currentValues, true);
             const finite = value => value !== null && Number.isFinite(value);
             const visibleX = new Set(stats.x);
             const visibleRows = stats.sourceValues.filter((_,i) => visibleX.has(stats.sourceX[i]));
@@ -555,24 +595,6 @@ def register_seac_callbacks(app):
             const historyZone = folds.length>=3 ? average(folds) : null;
             const latestCoverage=coverage(stats.currentColumn,zone);
             const latestZone=latestCoverage.score;
-            const globalMean=historical.length ? average(historical) : null;
-            const globalSD=historical.length>1 ? Math.sqrt(historical.reduce((sum,value)=>sum+(value-globalMean)**2,0)/(historical.length-1)) : null;
-            const span = values => Math.max(...values)-Math.min(...values);
-            const paired = stats.x.map((x,i)=>({x,m:mean[i],s:sd[i]})).filter(p=>finite(p.m)&&finite(p.s));
-            const scaled = (value,scale) => scale===0 ? (value===0 ? 0 : Infinity) : value/scale;
-            const historyStability = ready && paired.length>=5 ?
-                100/(1+scaled(span(paired.map(p=>p.m)),globalSD)+scaled(span(paired.map(p=>p.s)),globalSD)) : null;
-            const reference = new Map(paired.map(p=>[p.x,p]));
-            const conformity=[];
-            if (ready) stats.currentX.forEach((x,i)=>{
-                const historicalPoint=reference.get(x), m=current.mean[i], s=current.sd[i];
-                if (!historicalPoint || !finite(m) || !finite(s)) return;
-                const displacement=scaled(Math.abs(m-historicalPoint.m),historicalPoint.s);
-                const volatility=(s===0 && historicalPoint.s===0) ? 0 :
-                    (s===0 || historicalPoint.s===0) ? Infinity : Math.abs(Math.log(s/historicalPoint.s));
-                conformity.push(100/(1+displacement+volatility));
-            });
-            const latestStability = conformity.length>=5 ? average(conformity) : null;
             const score = value => finite(value) ? value.toFixed(1)+' / 100' : 'N/A';
             const format = value => Number(value.toPrecision(5)).toString();
             const validZone=zone ? stats.x.map((x,i)=>({x,i})).filter(p=>finite(zone.low[p.i]) && finite(zone.high[p.i])) : [];
@@ -581,7 +603,7 @@ def register_seac_callbacks(app):
             const details = 'Latest contract year: '+stats.currentYear+'; older years: '+older.length+
                 '; historical observations in visible window: '+historical.length+'; latest observations: '+latest.length+
                 '; latest containment dates scored: '+latestCoverage.count+'; valid held-out years: '+folds.length+
-                '; matched stability dates: '+conformity.length+'; rolling window: '+days+' calendar days'+
+                '; rolling window: '+days+' calendar days'+
                 (zonePoint ? '; reference zone at DTE '+zonePoint.x+': '+format(zone.low[zonePoint.i])+' to '+format(zone.high[zonePoint.i])+
                     '; width: '+format(zone.high[zonePoint.i]-zone.low[zonePoint.i])+'; reference observations: '+zone.counts[zonePoint.i] :
                     '; insufficient rolling percentile coverage (need 20 observations from at least 2 reference years per position)');
@@ -614,11 +636,10 @@ def register_seac_callbacks(app):
                 zoneUpdate(fold.traces,bounds || null,'Held-out historical zones',true);
             });
             return Plotly.restyle(graph, update, indices).then(() => [stats.revision,
-                score(historyZone),score(latestZone),score(historyStability),score(latestStability),details]);
+                score(historyZone),score(latestZone),details]);
         }""",
         Output("seac-stat-rendered", "data"),
         Output('seac-score-history-zone','children'),Output('seac-score-latest-zone','children'),
-        Output('seac-score-history-stability','children'),Output('seac-score-latest-stability','children'),
         Output('seac-score-details','children'),Input("seac-stat-visible", "value"),
         Input("seac-sd-multiplier", "value"), Input("seac-rolling-days", "value"),
         Input("seac-current-sd", "value"), Input("seac-statistics", "data"))
@@ -632,14 +653,9 @@ def register_seac_callbacks(app):
                 graph.data[point.trace].name !== 'Live price') return skip;
             if (!graph.data[config.bidTrace] || graph.data[config.bidTrace].name !== 'Bid range' ||
                 !graph.data[config.askTrace] || graph.data[config.askTrace].name !== 'Ask range') return skip;
-            const line = config.baseLine.map(p => p.slice());
             const stats = JSON.parse(JSON.stringify(config.baseStats));
             if (point.x.length) {
                 const x=point.x[0], y=point.y[0];
-                const date=new Date(Date.parse(config.expiry.slice(0,10)+'T00:00:00Z')+x*86400000).toISOString().slice(0,10);
-                const old=line.findIndex(p=>p[0]===x);
-                if(old>=0) line[old]=[x,y,date]; else line.push([x,y,date]);
-                line.sort((a,b)=>a[0]-b[0]);
                 let i=stats.sourceX.indexOf(x);
                 if(i<0) {
                     i=stats.sourceX.findIndex(value=>value>x);
@@ -653,12 +669,11 @@ def register_seac_callbacks(app):
             }
             stats.currentValues=stats.sourceValues.map(row=>[row[config.currentColumn]]);
             return Plotly.restyle(graph, {
-                x: [line.map(p=>p[0]),point.x,point.bid.x,point.ask.x],
-                y: [line.map(p=>p[1]),point.y,point.bid.y,point.ask.y],
-                text: [line.map(()=>null),point.x.map(()=>null),point.bid.text,point.ask.text],
-                hovertext: [line.map(()=>null),point.x.map(()=>null),point.bid.hover,point.ask.hover],
-                customdata: [line.map(p=>p[2]),point.x.map(()=>null),point.bid.x.map(()=>null),point.ask.x.map(()=>null)]
-            }, [config.yearTrace,point.trace,config.bidTrace,config.askTrace]).then(function() {
+                x: [point.x,point.bid.x,point.ask.x],
+                y: [point.y,point.bid.y,point.ask.y],
+                text: [point.x.map(()=>null),point.bid.text,point.ask.text],
+                hovertext: [point.x.map(()=>null),point.bid.hover,point.ask.hover]
+            }, [point.trace,config.bidTrace,config.askTrace]).then(function() {
                 window.dash_clientside.set_props('seac-statistics',{data:stats});
                 return point.revision;
             });
@@ -788,10 +803,9 @@ def register_seac_callbacks(app):
                 "sourceValues": [[float(v) if pd.notna(v) else None for v in row] for row in source.to_numpy()],
                 "currentX": result["series"][year].index.tolist() if year in result["series"] else []}
             if config:
-                config["baseLine"] = [[int(day), float(row.value), pd.Timestamp(row.date).strftime("%Y-%m-%d")]
-                                      for day, row in result["series"][year].iterrows()]
                 config["currentColumn"] = list(source.columns).index(year)
                 config["sourceColumns"] = len(source.columns)
+            settlement_frame = result['series'][year].copy() if year in result['series'] else None
             if x:
                 day = pd.Timestamp(expiry) + pd.Timedelta(days=x[0])
                 frame = result["series"][year]
@@ -803,6 +817,41 @@ def register_seac_callbacks(app):
                 source = source.sort_index()
             title = f"{product} · {format_contract_label(expression)}"
             figure = SeasonalityPlotter().build_seasonality_figure(result, title, height=690)
+            # Preserve historical overlays in the legend, but start with only latest-year bars.
+            figure.data = tuple(trace for trace in figure.data if trace.name != str(year))
+            latest_seac_year = max(result["series"], default=None)
+            for trace in figure.data:
+                if trace.name in {str(value) for value in result["series"]}:
+                    trace.visible = "legendonly"
+                    if trace.name == str(latest_seac_year):
+                        trace.line.color = "white"
+                        trace.line.width = 2
+            bars, minute_message = pd.DataFrame(), "Latest year is excluded."
+            if year not in set(exclude or []):
+                add_seac_overlay(figure, settlement_frame, year)
+                try:
+                    bars, minute_message = daily_minute_bars(product, expression, reference_day.isoformat(),
+                                                             str(expiry), tuple(signature))
+                except (ValueError, OSError, RuntimeError, duckdb.Error) as error:
+                    minute_message = f"Minute bars unavailable: {error}"
+                if not bars.empty:
+                    dates = pd.to_datetime(bars["timestamp"], utc=True).dt.tz_localize(None)
+                    offsets = (dates - pd.Timestamp(expiry)).dt.days
+                    baseline = config["points"][0][1] if config and "zero" in flags else 0
+                    if "zero" in flags and not config:
+                        # Use the same settlement baseline as the optional overlays.
+                        frame = base["series"].get(year)
+                        if frame is not None:
+                            low, high = result["window_bounds"]
+                            visible_frame = frame.loc[(frame.index >= low) & (frame.index <= high)].dropna(subset=["value"])
+                            if not visible_frame.empty:
+                                baseline = float(visible_frame.value.iloc[0])
+                    figure.add_trace(go.Candlestick(x=offsets, open=bars.open-baseline, high=bars.high-baseline,
+                        low=bars.low-baseline, close=bars.close-baseline, name=f"{year} daily candles",
+                        text=dates.dt.strftime("%Y-%m-%d"),
+                        increasing=dict(line=dict(color="#22c55e", width=1), fillcolor="#22c55e"),
+                        decreasing=dict(line=dict(color="#ef4444", width=1), fillcolor="#ef4444"),
+                        hoverinfo="x+text+name+y"))
             statistics = add_statistics(figure, result["combined"], stat_visible or [], multiplier, days,
                                         source, max(requested),
                                         result["series"][max(requested)].index if max(requested) in result["series"] else [],
@@ -810,16 +859,16 @@ def register_seac_callbacks(app):
             statistics["revision"] = uuid4().hex
             if config:
                 config["baseStats"] = {**statistics, **original_stats}
-                config["yearTrace"] = next(i for i, trace in enumerate(figure.data) if trace.name == str(year))
             figure.update_layout(meta={"stats": statistics["revision"]})
             figure.update_layout(font=dict(family="Arial, sans-serif", size=12, color="#e5e7eb"),
                 margin=dict(l=60, r=22, t=100, b=48), title=dict(x=.5, y=.98, xanchor="center", yanchor="top", font=dict(size=14)),
-                yaxis_title="Daily price change" if view == "change" else "Price change from first observation" if "zero" in flags else "Settlement price",
+                yaxis_title="Price change from first observation" if "zero" in flags else "Price",
                 uirevision=f"seac:{product}:{expression}:{sorted(requested)}:{window}:{view}:{flags}",
                 legend=dict(orientation="h", x=.5, xanchor="center", y=1.03), hovermode="x unified")
             figure.update_xaxes(range=result["window_bounds"], autorange=False, zeroline=True, zerolinecolor="#737373", showspikes=True)
+            figure.update_layout(xaxis_rangeslider_visible=False)
             figure.update_yaxes(zeroline=True, zerolinecolor="#d4d4d4", gridcolor="#232323")
-            figure.add_trace(go.Scatter(x=x, y=y, mode="markers", name="Live price",
+            figure.add_trace(go.Scatter(x=x, y=y, mode="markers", name="Live price", showlegend=False,
                 marker=dict(size=7, color="#22c55e", line=dict(color="white", width=1)),
                 hovertemplate="Live price<br>Value: %{y}<extra></extra>"))
             if config:
@@ -829,7 +878,7 @@ def register_seac_callbacks(app):
                                                ("ask", "#fbbf24", "rgba(251,191,36,.3)", "bottom right")):
                 point = side_point(config, quote, side)
                 figure.add_trace(go.Scatter(x=point["x"], y=point["y"], text=point["text"],
-                    mode="lines+text", name=side.title() + " range", cliponaxis=False,
+                    mode="lines+text", name=side.title() + " range", cliponaxis=False, showlegend=False,
                     line=dict(color=color,width=2),fill="toself",fillcolor=fill,
                     hovertext=point["hover"],hoveron="points+fills",
                     textposition=position, textfont=dict(color=color, size=12),
@@ -837,19 +886,26 @@ def register_seac_callbacks(app):
                 if config:
                     config[side + "Trace"] = len(figure.data) - 1
             observations = sum(len(frame) for frame in result["series"].values())
-            status = f"{len(result['series'])} years · {observations:,} observations · Today −90 to +90 calendar days · Daily settlements · Plot to apply edits"
-            notes = [html.P("White = latest displayed year. All years align to expiry. "
-                            "The live quote replaces today's latest-year observation in the line and statistics. Gaps are not filled. The green dot uses the local live-price server "
+            status = f"{len(bars):,} daily minute-based bars · {len(result['series'])} settlement years for scores · {observations:,} settlement observations · Today −90 to +90 calendar days"
+            notes = [html.P("Latest-year bars use only aligned minute prices within each UTC day's 10th–90th percentile range. "
+                            "Open/close are the first/last retained prices; high/low are the retained extremes. "
+                            "These filtered bars are not exchange trade OHLC. "
+                            "The selected year's SEAC settlement line is also available, hidden by default; click its legend entry to show it. "
+                            "Press Plot to refresh stored bars after a database update. Older-year settlement lines start hidden; click their legend entries to show them. "
+                            "SD bands start off. Scores and rolling zones still use settlement history plus today's live midpoint. "
+                            "All years align to expiry. Gaps are not filled. The green dot uses the local live-price server "
                             "and refreshes every 10 seconds. Blue/yellow bands show the lowest-to-highest available bid/ask "
                             "across discovered constructions, with raw price labels. Hover for the components. "
                             "Each construction has its own paired sides; band endpoints can come from different constructions. "
                             "These are discovered alternatives, not an exhaustive market range. The green reference midpoint "
-                            "continues to drive the current-year line and statistics. "
+                            "continues to drive the current-year statistics without changing the stored OHLC bars. "
                             "Quotes older than 2 minutes are hidden. No volume/OI data is included.")]
+            if minute_message:
+                notes.append(html.P(minute_message))
             notes += [html.Div(warning) for warning in base.get("warnings", [])[:25]]
             notes.append(html.P("Other-years rolling mean and sample SD exclude the latest selected contract year. "
-                                "The latest-year SD is calculated separately, including today's live observation. Both use "
-                                "the trailing N calendar days, including the current point. Missing values are not filled. "
+                                "The latest-year rolling mean and SD use the preceding N calendar days, excluding the day being evaluated "
+                                "and therefore excluding today's live observation from today's band. Other-years windows include the current point. Missing values are not filled. "
                                 "SD requires at least two observations. Earlier history warms up the visible window."))
             return figure, status, notes, config, statistics
         except (ValueError, TypeError, KeyError, OSError, RuntimeError, duckdb.Error) as error:

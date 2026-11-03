@@ -109,6 +109,63 @@ class MasterDatabase:
         """)
         return len(frame)
 
+    def fill_live_spread_gaps(self):
+        """Replace provisional values with the next fetched price, if available.
+
+        Keep live_spread_keys: these replacements remain estimates, and future
+        imports must revisit them even outside the normal overlap window.
+        """
+        return self._connection.execute('''
+            WITH observations AS (
+                SELECT p.timestamp,p.instrument,
+                    CASE WHEN l.instrument IS NULL AND isfinite(p.price)
+                        THEN p.price END AS fetched_price
+                FROM spread_prices p LEFT JOIN live_spread_keys l
+                    USING(instrument,timestamp)
+                WHERE p.instrument IN (SELECT DISTINCT instrument FROM live_spread_keys)
+            ), filled AS (
+                SELECT timestamp,instrument,
+                    FIRST_VALUE(fetched_price IGNORE NULLS) OVER (
+                        PARTITION BY instrument ORDER BY timestamp
+                        ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) AS price
+                FROM observations
+            )
+            UPDATE spread_prices p SET price=f.price
+            FROM filled f, live_spread_keys l
+            WHERE p.instrument=f.instrument AND p.timestamp=f.timestamp
+                AND l.instrument=p.instrument AND l.timestamp=p.timestamp
+                AND isfinite(f.price) AND p.price IS DISTINCT FROM f.price
+        ''').fetchone()[0]
+
+    def minute_cleanup_frames(self, start, end):
+        """Read each retained spread separately for bounded maintenance work."""
+        instruments = [row[0] for row in self._connection.execute('''
+            SELECT DISTINCT instrument FROM spread_prices
+            WHERE timestamp>=? AND timestamp<? ORDER BY instrument
+        ''', [start, end]).fetchall() if minute_instrument_allowed(row[0])]
+        for instrument in instruments:
+            frame = self._connection.execute('''
+                SELECT timestamp,price FROM spread_prices
+                WHERE instrument=? AND timestamp>=? AND timestamp<?
+                    AND isfinite(price) ORDER BY timestamp
+            ''', [instrument, start, end]).fetchdf()
+            yield instrument, frame
+
+    def replace_minute_spikes(self, corrections):
+        """Update existing observations without changing their source markers."""
+        if corrections.empty:
+            return 0
+        self._connection.register('minute_corrections', corrections)
+        try:
+            return self._connection.execute('''
+                UPDATE spread_prices p SET price=c.replacement
+                FROM minute_corrections c
+                WHERE p.instrument=c.instrument AND p.timestamp=c.timestamp
+                    AND p.price=c.original
+            ''').fetchone()[0]
+        finally:
+            self._connection.unregister('minute_corrections')
+
     def save_live_spreads(self, frame):
         """Fill missing/provisional minutes; never overwrite downloaded history."""
         if frame.empty:

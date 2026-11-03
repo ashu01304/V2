@@ -44,7 +44,28 @@ Then start whichever dashboards you need:
 | Bid/ask curves | `idea_dashboard.py` | 8055 |
 | SEAC seasonality | `idea_dashboard_2.py` | 8056 |
 | SEAC experiment | `seac_experiment.py` | 8057 |
+| Minute candlesticks | `candle_dashboard.py` | 8060 |
 | Live structure watchlist | `-m market_data.live_dashboard` | 8070 |
+
+The standalone minute candlestick dashboard uses stored data and does not require
+the live manager. Run `.\.venv\Scripts\python.exe -B candle_dashboard.py` and open
+**http://127.0.0.1:8060**. Choose a symbol, structure, anchor contract, month spacing,
+date range and candle interval, then click **Plot candles**. Custom mode accepts
+month expressions such as `Z26-2*F27+G27` for the selected symbol, or complete
+expressions such as `CL Z26 1MF - CO Z26 1MF`. Minute data requires zero net
+exposure per product and stored observations for all legs. Dates and chart times
+are UTC; the selected end date is inclusive. Candles aggregate minute observations,
+using fetched prices. Existing live-recorded points use the next fetched price
+for the same instrument, retaining the stored live value if no next fetched price
+exists. Other dashboards retain their
+existing source selection. Candles are
+not trade-level OHLC, so one observation gives a flat candle. Missing data is not
+filled. Click **Plot candles** again to reload after a database publication.
+On 8060, each candle additionally retains only minute prices inside that candle's
+inclusive 10th–90th percentile range before calculating all four OHLC values.
+Open/close use the first/last retained observations; prices are removed, not clipped.
+Empty filtered candles are omitted. The minimum offered interval is five minutes.
+8057 uses the same percentile aggregation for its latest-year daily candles.
 
 Restart running dashboards after this cleanup. The old
 `python -m structure_lab.dashboard` command is replaced by
@@ -75,6 +96,17 @@ Dashboards send complete structures through `DataClient` in `data_client.py`:
 `structure_parser.py` parses named structures and converts legacy expressions.
 `workflow_client.py` contains shared dashboard batching, session windows,
 minute-history helpers and compatibility calls to the common data client.
+The minute resolver drops isolated spike minutes after combining all required legs
+and before generating candles. It uses the same local jump-and-reversal rule as
+`clean_minute_spikes`, but removes flagged observations instead of replacing them.
+This read-time heuristic leaves database prices unchanged. The response reports
+`diagnostics.dropped_spikes` (also `normalized_spikes` for compatibility); callers can request `normalize_spikes=False` to
+inspect unmodified minute observations. It can suppress genuine short reversals
+and does not remove sustained distortions or all multi-minute anomalies.
+8057's daily candles use the same fetched-price and next-fetched/live-fallback
+settings as 8060. Their selected date windows and optional seasonality transforms
+can still differ. The standalone database cleanup script remains an explicit
+replacement tool; the extractor's drop rule never deletes stored rows.
 `analysis/seasonality.py`, `analysis/forward_curve.py` and `analysis/rollover.py`
 now request complete structures themselves while retaining chart/calendar logic.
 Their duplicate `market_data/structure_*` adapter classes have been removed;
@@ -150,6 +182,15 @@ Publication copies the master, takes the same writer lock used by `watch.py`,
 registers retained-product spread instruments and atomically replaces the master.
 Dashboards see these points after publication, not immediately on receipt.
 
+After each successful minute import, `watch.py` also replaces remaining
+live-recorded values in the master database with the next fetched price for
+the same instrument, keeping the stored value when no next fetched price exists.
+Only existing live-recorded rows are filled; absent timestamps are not created.
+If an instrument has no fetched price, its provisional value is left unchanged.
+The fill runs on the import's temporary database before atomic publication.
+Filled rows retain their `live_spread_keys` markers so future imports revisit
+and replace estimates with exact fetched observations.
+
 `live_spread_keys` marks these observations as provisional. Live recording never
 overwrites imported historical values. The existing `watch.py` importer includes
 the provisional period in its overlap, replaces matching points with downloaded
@@ -177,6 +218,44 @@ The existing historical updater command is unchanged:
 It is separate from the live manager. `diagnostics.cleanup_database` is an
 explicit master-data maintenance tool, not part of source cleanup or normal
 startup. The old `market_data.cleanup` command has been replaced by that module.
+
+For a one-time repair of fetched minute data for the last two calendar months:
+
+```powershell
+.\.venv\Scripts\python.exe -B -m market_data.force_refresh_minutes
+```
+
+This runs once and exits. It downloads spread history and force-overwrites every
+matching valid minute price in the selected UTC window, ignoring the usual
+incremental cutoff. New observations are added and matching provisional markers
+are removed. Unmatched observations and settlements are retained; this repair
+does not run gap filling. A `master_database.before_minute_refresh_*.duckdb` backup
+is saved beside the master before changes. The updated copy is published atomically
+under the shared writer lock. Progress is saved to `data/force_refresh_minutes.log`.
+
+To replace isolated minute spikes in the last two calendar months, preview first:
+
+```powershell
+.\.venv\Scripts\python.exe -B -m market_data.clean_minute_spikes
+```
+
+The preview writes `data/minute_spike_corrections_*.csv` with original and proposed
+prices. Apply the same detection rule with:
+
+```powershell
+.\.venv\Scripts\python.exe -B -m market_data.clean_minute_spikes --apply
+```
+
+This is a heuristic, not proof that a market observation is wrong. It flags a
+single observation more than eight robust deviations (and at least five ticks)
+from its local median, with a jump and reversal between neighboring observations
+no more than two minutes away. It replaces flagged values with the next observed
+price of the same instrument. It leaves sustained moves, session gaps and
+source markers unchanged. Apply creates a `before_spike_cleanup` database backup,
+records every proposed correction in a CSV, and atomically publishes the updated
+copy. This does not run automatically in `watch.py`; a future re-fetch may restore
+the source prices. Large structure values caused by differences across otherwise
+smooth component series may not be flagged by this per-instrument cleanup.
 
 ## Manual verification
 

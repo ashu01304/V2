@@ -1,0 +1,31 @@
+:root { color-scheme: dark; font-family: Arial, sans-serif; color: #dbe5f3; background: #0a1220; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+.candle-app { max-width: 1600px; margin: auto; padding: 32px; }
+header, .chart-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+h1 { font-size: 32px; margin: 8px 0; letter-spacing: -1px; }
+h2 { font-size: 16px; margin: 0; }
+p, .footnote { color: #94a8c3; line-height: 1.6; }
+.eyebrow { color: #38d9ac; letter-spacing: 2px; font-size: 11px; font-weight: bold; }
+.badge { border: 1px solid #2b4059; padding: 8px 12px; border-radius: 20px; font-size: 12px; white-space: nowrap; }
+.controls, .chart-panel { background: #111c2d; border: 1px solid #26374e; border-radius: 14px; margin-top: 22px; padding: 22px; }
+.candle-grid { display: grid; grid-template-columns: 1fr 1.5fr 1.5fr 1fr 1fr; gap: 18px; }
+.candle-field { min-width: 0; }
+.candle-field label { display: block; font-size: 12px; color: #a5b8d0; margin-bottom: 9px; }
+.candle-field input:not(.DateInput_input) { width: 100%; height: 38px; background: #0a1220; color: #dbe5f3; border: 1px solid #3b506c; border-radius: 5px; padding: 8px 10px; }
+.candle-actions { display: flex; gap: 20px; align-items: flex-end; margin: 20px 0; }
+button { background: #38d9ac; color: #08231b; border: 0; border-radius: 6px; font-size: 14px; font-weight: bold; padding: 13px 24px; cursor: pointer; }
+button:hover { background: #65e8c3; }
+button:focus-visible, input:focus-visible { outline: 2px solid #38d9ac; outline-offset: 3px; }
+.selection { color: #65e8c3; font-family: monospace; font-size: 14px; margin-top: 16px; overflow-wrap: anywhere; }
+.chart-heading span { font-size: 13px; color: #65e8c3; }
+.status { color: #a5b8d0; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.footnote { font-size: 12px; }
+.Select-control, .Select-menu-outer, .Select-menu { background: #0a1220 !important; border-color: #3b506c !important; color: #dbe5f3 !important; }
+.Select-value-label, .Select-placeholder, .Select-input > input { color: #dbe5f3 !important; }
+.Select-option { background: #0a1220; color: #dbe5f3; }
+.Select-option.is-focused { background: #26374e; }
+.Select-menu-outer { z-index: 10; }
+.DateInput_input { font-size: 14px; }
+@media (max-width: 1000px) { .candle-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .candle-app { padding: 16px; } .candle-grid { grid-template-columns: 1fr; } .candle-actions, header { align-items: flex-start; flex-direction: column; } .controls, .chart-panel { padding: 14px; } }

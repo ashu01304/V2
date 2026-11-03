@@ -150,21 +150,58 @@ class MarketData:
             ORDER BY s.trading_date
         ''',[*parameters,start,end,len(legs)]).fetchdf()
 
-    def structure_minutes(self, recipe, start, end):
+    def structure_minutes(self, recipe, start, end, *, fetched_only=False, fill_live_gaps=False):
         """Resolve a complete stored-spread recipe in one query; end is exclusive."""
         if not recipe:
             raise ValueError('A minute structure needs nonzero spread legs')
+        if fill_live_gaps:
+            return self._filled_structure_minutes(recipe,start,end)
         sql,parameters=_minute_query(recipe)
         sql=sql.replace('p.timestamp <= ?', 'p.timestamp < ?')
+        if fetched_only:
+            # Remove provisional legs before testing completeness, so a minute
+            # with even one provisional component cannot yield a partial price.
+            sql=sql.replace('AND isfinite(p.price)', '''AND isfinite(p.price)
+                AND NOT EXISTS (SELECT 1 FROM live_spread_keys l
+                    WHERE l.instrument=p.instrument AND l.timestamp=p.timestamp)''')
         return self._connection.execute(sql+' ORDER BY p.timestamp',
             [*parameters,start,end,len(recipe)]).fetchdf()
 
-    def spread_coverage(self, instruments, start=None, end=None):
+    def _filled_structure_minutes(self,recipe,start,end):
+        """Replace existing provisional rows only; never use them as fill anchors."""
+        values=','.join('(?,?)' for _ in recipe)
+        parameters=[value for item in recipe.items() for value in item]
+        return self._connection.execute(f'''
+            WITH recipe(instrument,weight) AS (VALUES {values}), observations AS (
+                SELECT p.timestamp,p.instrument,p.price AS stored_price,
+                    CASE WHEN NOT EXISTS (SELECT 1 FROM live_spread_keys l
+                        WHERE l.instrument=p.instrument AND l.timestamp=p.timestamp)
+                    THEN p.price END AS fetched_price
+                FROM spread_prices p JOIN recipe r USING(instrument)
+                WHERE isfinite(p.price)
+            ), filled AS (
+                SELECT timestamp,instrument,COALESCE(fetched_price,
+                    FIRST_VALUE(fetched_price IGNORE NULLS) OVER (
+                        PARTITION BY instrument ORDER BY timestamp
+                        ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING),stored_price) AS price
+                FROM observations
+            )
+            SELECT p.timestamp,SUM(p.price*r.weight) AS price
+            FROM filled p JOIN recipe r USING(instrument)
+            WHERE p.timestamp>=? AND p.timestamp<? AND isfinite(p.price)
+            GROUP BY p.timestamp HAVING COUNT(DISTINCT p.instrument)=?
+            ORDER BY p.timestamp
+        ''',[*parameters,start,end,len(recipe)]).fetchdf()
+
+    def spread_coverage(self, instruments, start=None, end=None, *, fetched_only=False, fill_live_gaps=False):
         """Finite observation counts and actual date bounds for selected stored IDs."""
         instruments=list(dict.fromkeys(instruments))
         if not instruments:
             return pd.DataFrame(columns=['instrument','rows','first','last'])
         conditions=['instrument IN ('+','.join('?' for _ in instruments)+')','isfinite(price)']
+        if fetched_only and not fill_live_gaps:
+            conditions.append('''NOT EXISTS (SELECT 1 FROM live_spread_keys l
+                WHERE l.instrument=spread_prices.instrument AND l.timestamp=spread_prices.timestamp)''')
         parameters=list(instruments)
         if start is not None:
             conditions.append('timestamp>=?')

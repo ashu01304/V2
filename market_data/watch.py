@@ -51,6 +51,8 @@ def main():
     configure_logging()
     faulthandler.enable()
     logging.info("Market-data updater started | database: %s", DATABASE_PATH)
+    logging.info("After fetching minutes, live-recorded points will use the next fetched "
+                 "price for the same instrument; points without a next fetched price are kept.")
     logging.info("Progress and errors are also saved to %s", LOG_PATH)
     try:
         lock = acquire_lock()
